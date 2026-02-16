@@ -1,0 +1,12 @@
+app:
+  name: telegram-leech-bot
+  services:
+    - name: bot
+      type: worker
+      instance_type: nano
+      env:
+        - key: API_ID
+        - key: API_HASH
+        - key: BOT_TOKEN
+      docker:
+        dockerfile: Dockerfile
