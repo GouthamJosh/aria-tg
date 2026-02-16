@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y \
     aria2 \
     qbittorrent-nox \
     p7zip-full \
+    wget \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
@@ -20,8 +22,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Create downloads directory
 RUN mkdir -p /tmp/downloads
 
-# Start aria2 and qBittorrent in background, then run bot
-CMD aria2c --enable-rpc --rpc-listen-all=true --rpc-allow-origin-all & \
-    qbittorrent-nox --webui-port=8080 & \
+# Expose ports (optional, for monitoring)
+EXPOSE 6800 8080
+
+# Start script
+CMD aria2c --enable-rpc \
+    --rpc-listen-all=true \
+    --rpc-allow-origin-all \
+    --rpc-listen-port=6800 \
+    --max-concurrent-downloads=5 \
+    --max-connection-per-server=10 \
+    --split=10 & \
+    qbittorrent-nox \
+    --webui-port=8080 \
+    --profile=/tmp \
+    & \
     sleep 5 && \
     python bot.py
