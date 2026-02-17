@@ -2,6 +2,8 @@
 
 A Telegram bot that downloads files via direct links using **Aria2**, then uploads them straight to Telegram — with live progress tracking on every phase.
 
+> **Author:** [GouthamSER](https://github.com/GouthamSER)
+
 ---
 
 ## ✨ Features
@@ -13,9 +15,11 @@ A Telegram bot that downloads files via direct links using **Aria2**, then uploa
   - 📦 Extract — per-file counter, processed size, speed
   - 📤 Upload — concurrent multi-file uploads with shared bandwidth
 - **Concurrent uploads** — multiple files upload simultaneously, not one by one
+- **Telegram Premium support** — 4 GB upload limit if owner has Premium, 2 GB otherwise
 - **Cancel anytime** — `/stop` cleans up files instantly
-- **System stats** — CPU %, RAM usage, and bot uptime on every status message
+- **System stats** — CPU %, RAM usage, disk free space, and bot uptime on every message
 - **Auto cleanup** — all temporary files deleted after upload completes
+- **Koyeb ready** — built-in aiohttp keep-alive web server so Koyeb never shuts the service down
 
 ---
 
@@ -28,7 +32,7 @@ A Telegram bot that downloads files via direct links using **Aria2**, then uploa
 | `/leech <url> -e` | Download and extract archive before uploading |
 | `/l <url> -e` | Shorthand for extract mode |
 | `/stop <task_id>` | Cancel a running task and clean up files |
-| `/stop_<task_id>` | Inline cancel (shown in progress message) |
+| `/stop_<task_id>` | Inline cancel (shown in the progress message) |
 | `/start` or `/help` | Show help message |
 
 ---
@@ -61,6 +65,7 @@ tgcrypto
 aria2p
 py7zr
 psutil
+aiohttp
 ```
 
 ---
@@ -69,27 +74,38 @@ psutil
 
 Set the following environment variables before running:
 
-| Variable | Description | Where to get |
+| Variable | Required | Description |
 |---|---|---|
-| `API_ID` | Telegram API ID | [my.telegram.org](https://my.telegram.org) |
-| `API_HASH` | Telegram API Hash | [my.telegram.org](https://my.telegram.org) |
-| `BOT_TOKEN` | Bot token | [@BotFather](https://t.me/BotFather) |
+| `API_ID` | ✅ | Telegram API ID — [my.telegram.org](https://my.telegram.org) |
+| `API_HASH` | ✅ | Telegram API Hash — [my.telegram.org](https://my.telegram.org) |
+| `BOT_TOKEN` | ✅ | Bot token — [@BotFather](https://t.me/BotFather) |
+| `OWNER_ID` | ✅ | Your Telegram user ID (get it from [@userinfobot](https://t.me/userinfobot)) |
+| `OWNER_PREMIUM` | ⚙️ | Set to `true` if you have Telegram Premium → enables 4 GB uploads (default: `false` = 2 GB) |
+| `PORT` | ⚙️ | Port for the keep-alive web server (default: `8000`, Koyeb sets this automatically) |
 
-### Set environment variables
-
-```bash
-export API_ID=your_api_id
-export API_HASH=your_api_hash
-export BOT_TOKEN=your_bot_token
-```
-
-Or create a `.env` file and load it:
+### `.env` example
 
 ```env
 API_ID=123456
 API_HASH=abcdef1234567890abcdef1234567890
 BOT_TOKEN=123456789:AABBCCDDEEFFaabbccddeeff
+OWNER_ID=987654321
+OWNER_PREMIUM=true
+PORT=8000
 ```
+
+---
+
+## 📤 Upload Size Limit
+
+The bot automatically picks the right limit based on the `OWNER_PREMIUM` flag:
+
+| `OWNER_PREMIUM` | Max file size |
+|---|---|
+| `false` (default) | **2 GB** — standard Telegram Bot API limit |
+| `true` | **4 GB** — Telegram Premium limit |
+
+> ⚠️ The **bot account itself does not need Premium** — only the owner/admin receiving the files needs a Premium account for 4 GB uploads to work.
 
 ---
 
@@ -112,30 +128,33 @@ aria2c --enable-rpc \
 python3 leech_bot.py
 ```
 
-### Run with systemd (optional)
+---
 
-Create `/etc/systemd/system/leechbot.service`:
+## ☁️ Deploying on Koyeb
 
-```ini
-[Unit]
-Description=Leech Bot
-After=network.target
+The bot includes a built-in **aiohttp web server** that runs alongside the bot. Koyeb requires every service to expose an HTTP endpoint — this server satisfies that requirement and prevents the service from being killed.
 
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/leechbot
-EnvironmentFile=/home/ubuntu/leechbot/.env
-ExecStartPre=aria2c --enable-rpc --rpc-listen-port=6800 --daemon
-ExecStart=python3 leech_bot.py
-Restart=always
+### Health check endpoints
 
-[Install]
-WantedBy=multi-user.target
+| Endpoint | Response |
+|---|---|
+| `GET /` | Bot status, active downloads, upload limit |
+| `GET /health` | Same as above |
+
+### Steps
+
+1. Push your code to GitHub
+2. Create a new **Koyeb** service → select your repo
+3. Set **Run command**: `python3 leech_bot.py`
+4. Set **Port**: `8000` (or leave blank — Koyeb injects `$PORT` automatically)
+5. Add all environment variables in the Koyeb dashboard
+6. Add a **Health check** pointing to `/health`
+7. Deploy 🚀
+
+### `Procfile` (optional)
+
 ```
-
-```bash
-sudo systemctl enable leechbot
-sudo systemctl start leechbot
+web: aria2c --enable-rpc --rpc-listen-port=6800 --daemon && python3 leech_bot.py
 ```
 
 ---
@@ -158,6 +177,7 @@ Task By @username ( #123456789 ) [Link]
 
 📊 Bot Stats
 ├ CPU → 8.20% | RAM → 1.40GB [52.3%]
+├ Disk → 42.50GB free of 100.00GB [57.5% used]
 └ UP → 3h12m5s
 ```
 
@@ -173,6 +193,11 @@ Task By @username ( #123456789 ) [Link]
 ├ Time → 1s ( 2s )
 ├ Archive → big_file.zip
 └ Archive Size → 1.20GB
+
+📊 Bot Stats
+├ CPU → 22.10% | RAM → 1.80GB [66.2%]
+├ Disk → 38.20GB free of 100.00GB [61.8% used]
+└ UP → 3h13m44s
 ```
 
 ### Uploading (concurrent)
@@ -187,6 +212,7 @@ Task By @username ( #123456789 ) [Link]
 
 📊 Bot Stats
 ├ CPU → 15.10% | RAM → 1.60GB [59.8%]
+├ Disk → 40.00GB free of 100.00GB [60.0% used]
 └ UP → 3h14m22s
 ```
 
@@ -195,9 +221,10 @@ Task By @username ( #123456789 ) [Link]
 ## 📁 Project Structure
 
 ```
-aria-tg/
-├── bot.py      # Main bot file
+leechbot/
+├── leech_bot.py      # Main bot file
 ├── requirements.txt  # Python dependencies
+├── Procfile          # Koyeb / Heroku process file (optional)
 ├── README.md         # This file
 └── .env              # Environment variables (never commit this)
 ```
@@ -206,13 +233,18 @@ aria-tg/
 
 ## ⚠️ Limitations
 
-- Max file size: **2GB** (Telegram Bot API limit)
-- Files larger than 2GB are skipped with an error message
-- Aria2 must be running as an RPC daemon before starting the bot
-- The bot stores temporary files in `/tmp/downloads` — ensure enough disk space
+- Files larger than the configured limit (2 GB / 4 GB) are skipped with an error message
+- Aria2 must be running as an RPC daemon **before** starting the bot
+- Bot stores temporary files in `/tmp/downloads` — ensure enough disk space for your downloads
 
 ---
 
 ## 📝 License
 
 MIT License — free to use, modify, and distribute.
+
+---
+
+<div align="center">
+  Made with ❤️ by <a href="https://github.com/GouthamSER">GouthamSER</a>
+</div>
