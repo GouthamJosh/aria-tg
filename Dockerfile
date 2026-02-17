@@ -1,9 +1,13 @@
-# Use a lightweight Python version
-FROM python:3.10-slim-buster
+# CHANGE: Use 'bookworm' (Newer Debian 12) instead of 'buster'
+FROM python:3.10-slim-bookworm
 
-# Install system dependencies (Aria2 is required for the bot to work)
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+# Added --no-install-recommends to keep the image small
+RUN apt-get update && apt-get install -y --no-install-recommends \
     aria2 \
+    build-essential \
+    libffi-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -23,4 +27,4 @@ RUN chmod +x run.sh
 EXPOSE 8000
 
 # Command to run when the container starts
-CMD ["bash", "start.sh"]
+CMD ["bash", "run.sh"]
