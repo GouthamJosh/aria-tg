@@ -2,6 +2,8 @@ import os
 import time
 import asyncio
 import aria2p
+import aiohttp
+from aiohttp import web
 from pyrogram import Client, filters
 from pyrogram.types import Message
 import py7zr
@@ -16,15 +18,27 @@ import psutil
 API_ID = os.environ.get("API_ID",'18979569')
 API_HASH = os.environ.get("API_HASH",'45db354387b8122bdf6c1b0beef93743')
 BOT_TOKEN = os.environ.get("BOT_TOKEN",'7531165057:AAHnMXz9LmogLXtpFfZaYL3kFL5YRZ5bOAU')
+OWNER_ID     = int(os.environ.get("OWNER_ID", "6108995220"))   # Your Telegram user ID
 DOWNLOAD_DIR = "/tmp/downloads"
-ARIA2_HOST  = "http://localhost"
-ARIA2_PORT  = 6800
+ARIA2_HOST   = "http://localhost"
+ARIA2_PORT   = 6800
+
+# ── Upload size limits ────────────────────────────────────────────────────────
+# If the owner/admin has Telegram Premium the bot can send files up to 4 GB,
+# otherwise the standard 2 GB limit applies.
+# Set OWNER_PREMIUM=true in your environment if you have Premium.
+OWNER_PREMIUM    = os.environ.get("OWNER_PREMIUM", "false").lower() == "true"
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024 if OWNER_PREMIUM else 2 * 1024 * 1024 * 1024
+MAX_UPLOAD_LABEL = "4GB" if OWNER_PREMIUM else "2GB"
+
+# ── Koyeb / keep-alive web server ─────────────────────────────────────────────
+PORT = int(os.environ.get("PORT", "8000"))  # Koyeb injects $PORT automatically
 
 # Initialize Pyrogram client
 app = Client("leech_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # Initialize Aria2
-aria2 = aria2p.API(aria2p.Client(host=ARIA2_HOST, port=ARIA2_PORT, secret=""))
+aria2 = aria2p.API(aria2p.Client(host=ARIA2_HOST, port=ARIA2_PORT, secret="gjxml"))
 
 # Active downloads tracking
 active_downloads = {}
@@ -94,11 +108,19 @@ def get_system_stats():
     ram_used_gb  = ram.used / (1024 ** 3)
     ram_percent  = ram.percent
     uptime       = time.time() - psutil.boot_time()
+    disk        = psutil.disk_usage(DOWNLOAD_DIR)
+    disk_free   = disk.free / (1024 ** 3)
+    disk_total  = disk.total / (1024 ** 3)
+    disk_percent = disk.percent
+
     return {
-        'cpu':        cpu_percent,
-        'ram_used':   ram_used_gb,
-        'ram_percent': ram_percent,
-        'uptime':     format_time(uptime),
+        'cpu':          cpu_percent,
+        'ram_used':     ram_used_gb,
+        'ram_percent':  ram_percent,
+        'uptime':       format_time(uptime),
+        'disk_free':    disk_free,
+        'disk_total':   disk_total,
+        'disk_percent': disk_percent,
     }
 
 
@@ -163,8 +185,8 @@ async def update_progress(task, message):
                     user_mention = f"User #{task.user_id}"
 
                 status_text = (
-                    f"├ **File** → `{filename}`\n\n"
                     f"**Task By** {user_mention} ( #{task.user_id} ) [Link]\n"
+                    f"├ **File** → `{filename}`\n"
                     f"├ {progress_bar}\n"
                     f"├ **Processed** → {size_text}\n"
                     f"├ **Status** → Download\n"
@@ -176,6 +198,7 @@ async def update_progress(task, message):
                     f"└ **Stop** → /stop_{task.gid[:8]}\n\n"
                     f"**📊 Bot Stats**\n"
                     f"├ **CPU** → {stats['cpu']:.2f}% | **RAM** → {stats['ram_used']:.2f}GB [{stats['ram_percent']:.1f}%]\n"
+                    f"├ **Disk** → {stats['disk_free']:.2f}GB free of {stats['disk_total']:.2f}GB [{stats['disk_percent']:.1f}% used]\n"
                     f"└ **UP** → {stats['uptime']}"
                 )
 
@@ -222,9 +245,9 @@ async def extract_archive(file_path, extract_to, status_msg=None, task=None):
 
             file_label = f"{file_index}/{total_files}"
             text = (
-                f"├ **File** → `{current_file}`\n"
-                f"├ **Files** → {file_label}\n\n"
                 f"**Task By** {user_label} [Link]\n"
+                f"├ **File** → `{current_file}`\n"
+                f"├ **Files** → {file_label}\n"
                 f"├ {prog_bar}\n"
                 f"├ **Processed** → {format_size(extracted_bytes)} of {format_size(total_bytes)}\n"
                 f"├ **Status** → Extracting\n"
@@ -234,6 +257,7 @@ async def extract_archive(file_path, extract_to, status_msg=None, task=None):
                 f"└ **Archive Size** → {format_size(total_size)}\n\n"
                 f"**📊 Bot Stats**\n"
                 f"├ **CPU** → {stats['cpu']:.2f}% | **RAM** → {stats['ram_used']:.2f}GB [{stats['ram_percent']:.1f}%]\n"
+                f"├ **Disk** → {stats['disk_free']:.2f}GB free of {stats['disk_total']:.2f}GB [{stats['disk_percent']:.1f}% used]\n"
                 f"└ **UP** → {stats['uptime']}"
             )
             try:
@@ -346,9 +370,9 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
         file_line = f"├ **Files** → {file_index}/{total_files}\n" if total_files > 1 else ""
 
         text = (
-            f"├ **File** → `{filename}`\n\n"
-            f"{file_line}"
             f"**Task By** {user_label} [Link]\n"
+            f"├ **File** → `{filename}`\n"
+            f"{file_line}"
             f"├ {prog_bar}\n"
             f"├ **Processed** → {format_size(uploaded)} of {format_size(total)}\n"
             f"├ **Status** → Uploading\n"
@@ -358,6 +382,7 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
             f"└ **File Size** → {format_size(total)}\n\n"
             f"**📊 Bot Stats**\n"
             f"├ **CPU** → {stats['cpu']:.2f}% | **RAM** → {stats['ram_used']:.2f}GB [{stats['ram_percent']:.1f}%]\n"
+            f"├ **Disk** → {stats['disk_free']:.2f}GB free of {stats['disk_total']:.2f}GB [{stats['disk_percent']:.1f}% used]\n"
             f"└ **UP** → {stats['uptime']}"
         )
         try:
@@ -369,8 +394,8 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
     try:
         if os.path.isfile(file_path):
             file_size = os.path.getsize(file_path)
-            if file_size > 2000 * 1024 * 1024:
-                await message.reply_text("❌ File too large for Telegram (>2GB)")
+            if file_size > MAX_UPLOAD_BYTES:
+                await message.reply_text(f"❌ File too large for Telegram (>{MAX_UPLOAD_LABEL})")
                 return False
 
             filename          = os.path.basename(file_path)
@@ -404,7 +429,7 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
             for root, dirs, filenames in os.walk(file_path):
                 for fname in filenames:
                     fpath = os.path.join(root, fname)
-                    if os.path.getsize(fpath) <= 2000 * 1024 * 1024:
+                    if os.path.getsize(fpath) <= MAX_UPLOAD_BYTES:
                         files.append(fpath)
 
             total_files = len(files)
@@ -453,6 +478,7 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
                 lines.append(
                     f"\n**📊 Bot Stats**\n"
                     f"├ **CPU** → {stats['cpu']:.2f}% | **RAM** → {stats['ram_used']:.2f}GB [{stats['ram_percent']:.1f}%]\n"
+                    f"├ **Disk** → {stats['disk_free']:.2f}GB free of {stats['disk_total']:.2f}GB [{stats['disk_percent']:.1f}% used]\n"
                     f"└ **UP** → {stats['uptime']}"
                 )
                 try:
@@ -643,9 +669,51 @@ async def stop_command(client, message: Message):
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
 
-if __name__ == "__main__":
+# ─────────────────────────────────────────────────────────────────────────────
+#  Koyeb keep-alive web server (aiohttp)
+#  Koyeb requires a running HTTP service; this tiny server satisfies that
+#  requirement and also lets you ping the bot to prevent cold-start sleeps.
+# ─────────────────────────────────────────────────────────────────────────────
+async def health_handler(request):
+    """Simple health-check endpoint — returns 200 OK with bot status."""
+    return web.Response(
+        text=(
+            "✅ Leech Bot is alive\n"
+            f"Active downloads: {len(active_downloads)}\n"
+            f"Upload limit: {MAX_UPLOAD_LABEL} "
+            f"({'Premium' if OWNER_PREMIUM else 'Standard'})"
+        ),
+        content_type="text/plain",
+    )
+
+async def start_web_server():
+    """Start the aiohttp web server for Koyeb health checks."""
+    web_app = web.Application()
+    web_app.router.add_get("/", health_handler)
+    web_app.router.add_get("/health", health_handler)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"🌐 Keep-alive server running on port {PORT}")
+
+async def main():
+    """Run bot and web server concurrently."""
     print("🚀 Starting Leech Bot...")
-    print("📋 Commands: /leech, /l, /stop")
-    print("🎨 Live progress — Download / Extract / Upload")
-    print("🧹 Auto cleanup after every upload")
-    app.run()
+    print(f"📋 Commands: /leech, /l, /stop")
+    print(f"🎨 Live progress — Download / Extract / Upload")
+    print(f"🧹 Auto cleanup after every upload")
+    print(f"📦 Max upload size: {MAX_UPLOAD_LABEL} ({'Premium' if OWNER_PREMIUM else 'Standard'})")
+    print(f"🌐 Koyeb keep-alive on port {PORT}")
+
+    await start_web_server()
+    await app.start()
+
+    # Keep running until interrupted
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await app.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())
