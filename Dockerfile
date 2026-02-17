@@ -1,8 +1,6 @@
-# CHANGE: Use 'bookworm' (Newer Debian 12) instead of 'buster'
 FROM python:3.10-slim-bookworm
 
-# Install system dependencies
-# Added --no-install-recommends to keep the image small
+# 1. Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     aria2 \
     build-essential \
@@ -10,21 +8,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install them
-COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
-
-# Copy the rest of the files
+# 2. Copy your bot files
 COPY . .
 
-# Make sure the start script is executable
-RUN chmod +x run.sh
+# 3. Install Python requirements
+# (Make sure requirements.txt exists in your repo)
+RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Expose the port for Koyeb Health Checks
+# 4. FIX: Create run.sh automatically inside the image
+# This fixes the "No such file" error by generating the script right here.
+RUN echo '#!/bin/bash' > start.sh && \
+    echo 'echo "🚀 Starting Aria2c daemon..."' >> start.sh && \
+    echo 'aria2c --enable-rpc --rpc-listen-all=false --rpc-listen-port=6800 --rpc-secret=${ARIA2_SECRET:-gjxml} --daemon=true' >> start.sh && \
+    echo 'sleep 3' >> start.sh && \
+    echo 'echo "🚀 Starting Leech Bot..."' >> start.sh && \
+    echo 'python3 bot.py' >> start.sh && \
+    chmod +x start.sh
+
+# 5. Run it
 EXPOSE 8000
-
-# Command to run when the container starts
-CMD ["bash", "run.sh"]
+CMD ["bash", "start.sh"]
