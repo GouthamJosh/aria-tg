@@ -24,7 +24,7 @@ ARIA2_PORT  = 6800
 app = Client("leech_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # Initialize Aria2
-aria2 = aria2p.API(aria2p.Client(host=ARIA2_HOST, port=ARIA2_PORT, secret="gjxml"))
+aria2 = aria2p.API(aria2p.Client(host=ARIA2_HOST, port=ARIA2_PORT, secret=""))
 
 # Active downloads tracking
 active_downloads = {}
@@ -163,8 +163,8 @@ async def update_progress(task, message):
                     user_mention = f"User #{task.user_id}"
 
                 status_text = (
+                    f"├ **File** → `{filename}`\n\n"
                     f"**Task By** {user_mention} ( #{task.user_id} ) [Link]\n"
-                    f"├ **File** → `{filename}`\n"
                     f"├ {progress_bar}\n"
                     f"├ **Processed** → {size_text}\n"
                     f"├ **Status** → Download\n"
@@ -222,9 +222,9 @@ async def extract_archive(file_path, extract_to, status_msg=None, task=None):
 
             file_label = f"{file_index}/{total_files}"
             text = (
-                f"**Task By** {user_label} [Link]\n"
                 f"├ **File** → `{current_file}`\n"
-                f"├ **Files** → {file_label}\n"
+                f"├ **Files** → {file_label}\n\n"
+                f"**Task By** {user_label} [Link]\n"
                 f"├ {prog_bar}\n"
                 f"├ **Processed** → {format_size(extracted_bytes)} of {format_size(total_bytes)}\n"
                 f"├ **Status** → Extracting\n"
@@ -346,9 +346,9 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
         file_line = f"├ **Files** → {file_index}/{total_files}\n" if total_files > 1 else ""
 
         text = (
-            f"**Task By** {user_label} [Link]\n"
-            f"├ **File** → `{filename}`\n"
+            f"├ **File** → `{filename}`\n\n"
             f"{file_line}"
+            f"**Task By** {user_label} [Link]\n"
             f"├ {prog_bar}\n"
             f"├ **Processed** → {format_size(uploaded)} of {format_size(total)}\n"
             f"├ **Status** → Uploading\n"
