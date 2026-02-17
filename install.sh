@@ -1,22 +1,18 @@
 #!/bin/bash
 
-echo "🔧 Installing aria2 and qBittorrent..."
+echo "🔧 Installing aria2 (static binary)..."
 
-# Update package list
-apt-get update
+# Download aria2 static build
+ARIA2_VERSION=1.37.0
+wget https://github.com/aria2/aria2/releases/download/release-${ARIA2_VERSION}/aria2-${ARIA2_VERSION}-linux-gnu-64bit-build1.tar.bz2
 
-# Install aria2
-echo "📥 Installing aria2..."
-apt-get install -y aria2
+tar -xjf aria2-${ARIA2_VERSION}-linux-gnu-64bit-build1.tar.bz2
 
-# Install qBittorrent-nox
-echo "📥 Installing qBittorrent..."
-apt-get install -y qbittorrent-nox
+# Move aria2c to project root
+mv aria2-*/aria2c ./aria2c
+chmod +x aria2c
 
-# Install 7zip
-echo "📥 Installing 7zip..."
-apt-get install -y p7zip-full
+echo "✅ aria2 installed locally"
 
-echo "✅ Installation complete!"
-echo ""
-echo "Now run: bash start.sh"
+echo "⚠️ qBittorrent cannot be installed on Koyeb native."
+echo "Use aria2 only OR switch to Docker."
