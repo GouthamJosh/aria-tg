@@ -176,9 +176,9 @@ async def update_progress(task, message):
                 user_mention = f"User #{task.user_id}"
 
             status_text = (
+                f"├ **File** → `{filename}`\n\n"
                 f"**Task By** {user_mention} ( #{task.user_id} ) [Link]\n"
                 f"├ {progress_bar}\n"
-                f"├ **File** → `{filename}`\n"
                 f"├ **Processed** → {format_size(downloaded)} of {format_size(total_size)}\n"
                 f"├ **Status** → Download\n"
                 f"├ **Speed** → {format_speed(speed)}\n"
@@ -255,10 +255,10 @@ async def extract_archive(file_path, extract_to, status_msg=None, task=None):
             file_label  = f"{file_index}/{total_files}" if total_files > 1 else "1/1"
 
             text = (
+                f"├ **File** → `{current_file}`\n"
+                f"├ **Files** → {file_label}\n\n"
                 f"**Task By** {user_label} [Link]\n"
                 f"├ {prog_bar}\n"
-                f"├ **File** → `{current_file}`\n"
-                f"├ **Files** → {file_label}\n"
                 f"├ **Processed** → {format_size(extracted_bytes)} of {format_size(total_bytes)}\n"
                 f"├ **Status** → Extracting\n"
                 f"├ **Speed** → {format_speed(speed)}\n"
@@ -407,10 +407,10 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
         file_line  = f"├ **Files** → {file_label}\n" if total_files > 1 else ""
 
         text = (
+            f"├ **File** → `{filename}`\n"
+            f"{file_line}\n\n"
             f"**Task By** {user_label} [Link]\n"
             f"├ {prog_bar}\n"
-            f"├ **File** → `{filename}`\n"
-            f"{file_line}"
             f"├ **Processed** → {format_size(uploaded)} of {format_size(total)}\n"
             f"├ **Status** → Uploading\n"
             f"├ **Speed** → {format_speed(speed)}\n"
