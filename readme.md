@@ -1,250 +1,228 @@
 # 🤖 Leech Bot
 
-A Telegram bot that downloads files via direct links using **Aria2**, then uploads them straight to Telegram — with live progress tracking on every phase.
-
-> **Author:** [GouthamSER](https://github.com/GouthamSER)
+A Telegram bot that downloads files via **Aria2c RPC**, then uploads them directly to Telegram — with live progress UI for every stage.
 
 ---
 
 ## ✨ Features
 
-- **Direct link downloads** — HTTP, HTTPS, FTP
-- **Auto extraction** — `.zip`, `.7z`, `.tar`, `.tar.gz`, `.tgz`
-- **Live progress UI** on all three phases:
-  - 📥 Download — filename, speed, ETA, progress bar
-  - 📦 Extract — per-file counter, processed size, speed
-  - 📤 Upload — concurrent multi-file uploads with shared bandwidth
-- **Concurrent uploads** — multiple files upload simultaneously, not one by one
-- **Telegram Premium support** — 4 GB upload limit if owner has Premium, 2 GB otherwise
-- **Cancel anytime** — `/stop` cleans up files instantly
-- **System stats** — CPU %, RAM usage, disk free space, and bot uptime on every message
-- **Auto cleanup** — all temporary files deleted after upload completes
-- **Koyeb ready** — built-in aiohttp keep-alive web server so Koyeb never shuts the service down
+- 📥 Download any direct HTTP/HTTPS/FTP link via Aria2c
+- 📤 Upload to Telegram with live speed & progress bar
+- 📦 Auto-extract `.zip` `.7z` `.tar.gz` archives
+- 🧹 Auto-cleanup after upload
+- 📊 Live CPU / RAM / Disk stats in progress messages
+- 🚫 Site-name prefix auto-stripped from filenames (e.g. `www.site.com - Movie.mkv` → `Movie.mkv`)
+- 🛡️ FloodWait protection & rate-limited message edits
+- ⚡ uvloop + TgCrypto for maximum speed
+- 🌐 Built-in keep-alive web server (Koyeb / Render / Railway ready)
 
 ---
 
-## 📋 Commands
+## 📁 File Structure
+
+```
+├── bot.py            # Main bot code
+├── start.sh          # Universal startup script (installs aria2c if missing)
+├── Dockerfile        # Docker image (recommended for all platforms)
+├── requirements.txt  # Python dependencies
+└── README.md
+```
+
+---
+
+## ⚙️ Environment Variables
+
+Set these in your platform's dashboard or `.env` file:
+
+| Variable | Required | Description | Example |
+|---|---|---|---|
+| `API_ID` | ✅ | Telegram API ID from [my.telegram.org](https://my.telegram.org) | `12345678` |
+| `API_HASH` | ✅ | Telegram API Hash | `abc123...` |
+| `BOT_TOKEN` | ✅ | Bot token from [@BotFather](https://t.me/BotFather) | `123:ABC...` |
+| `OWNER_ID` | ✅ | Your Telegram user ID | `6108995220` |
+| `ARIA2_SECRET` | ⚠️ | Aria2c RPC secret (default: `gjxml`) | `mysecret` |
+| `OWNER_PREMIUM` | ❌ | Set `true` for 4GB upload limit | `false` |
+| `PORT` | ❌ | Keep-alive web server port (default: `8000`) | `8000` |
+
+> Get your user ID from [@userinfobot](https://t.me/userinfobot)
+> Get `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org) → API Development Tools
+
+---
+
+## 🚀 Deploy
+
+### 🐳 Docker (Recommended — Koyeb / Render / Railway)
+
+```bash
+# Build
+docker build -t leech-bot .
+
+# Run
+docker run -d \
+  -e API_ID=your_api_id \
+  -e API_HASH=your_api_hash \
+  -e BOT_TOKEN=your_bot_token \
+  -e OWNER_ID=your_user_id \
+  -e ARIA2_SECRET=gjxml \
+  -p 8000:8000 \
+  leech-bot
+```
+
+---
+
+### ☁️ Koyeb
+
+1. Push this repo to GitHub
+2. Go to [koyeb.com](https://koyeb.com) → **Create Service** → **GitHub**
+3. Select your repo — Koyeb auto-detects the `Dockerfile`
+4. Add environment variables in the **Environment** tab
+5. Set **Port** to `8000`
+6. Deploy ✅
+
+---
+
+### ☁️ Render
+
+1. Go to [render.com](https://render.com) → **New Web Service**
+2. Connect your GitHub repo
+3. Set **Runtime** to `Docker`
+4. Add environment variables under **Environment**
+5. Set **Port** to `8000`
+6. Deploy ✅
+
+---
+
+### ☁️ Railway
+
+1. Go to [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub**
+2. Select your repo — Railway auto-detects the `Dockerfile`
+3. Go to **Variables** and add all environment variables
+4. Deploy ✅
+
+---
+
+### ☁️ JustRunMyApp / No-Docker Platforms
+
+If the platform ignores the Dockerfile and runs `start.sh` on a bare Python runtime, the `start.sh` will auto-install `aria2c` using one of these fallback methods:
+
+1. `apt-get install aria2` (Debian/Ubuntu base)
+2. `apk add aria2` (Alpine base)
+3. Static binary download (x86_64 / ARM64)
+4. `pip install aria2` (bundled binary, no root needed)
+
+Make sure `start.sh` is set as the **Run Command** in your platform settings.
+
+---
+
+## 💬 Bot Commands
 
 | Command | Description |
 |---|---|
-| `/leech <url>` | Download a direct link and upload to Telegram |
-| `/l <url>` | Shorthand for `/leech` |
-| `/leech <url> -e` | Download and extract archive before uploading |
-| `/l <url> -e` | Shorthand for extract mode |
-| `/stop <task_id>` | Cancel a running task and clean up files |
-| `/stop_<task_id>` | Inline cancel (shown in the progress message) |
 | `/start` or `/help` | Show help message |
+| `/leech <url>` | Download & upload a file |
+| `/l <url>` | Shorthand for `/leech` |
+| `/leech <url> -e` | Download & extract archive, then upload |
+| `/stop_<id>` | Cancel a running task |
+
+### Examples
+
+```
+/leech https://example.com/movie.mkv
+/l https://example.com/archive.zip
+/leech https://example.com/files.7z -e
+```
 
 ---
 
-## 📦 Requirements
+## 📦 Dependencies
 
-### System Dependencies
-
-- **Python 3.10+**
-- **Aria2** — download engine
-
-```bash
-# Ubuntu / Debian
-sudo apt install aria2
-
-# Start aria2 as RPC daemon
-aria2c --enable-rpc --rpc-listen-all=false --rpc-listen-port=6800 --daemon
+```
+pyrofork       # Telegram client (Pyrogram fork)
+TgCrypto       # Fast MTProto crypto (required for speed)
+aria2p         # Aria2c RPC interface
+aiohttp        # Async HTTP + keep-alive web server
+py7zr          # 7z extraction
+psutil         # System stats (CPU/RAM/Disk)
+uvloop         # Fast async event loop (optional but recommended)
 ```
 
-### Python Dependencies
-
+Install:
 ```bash
 pip install -r requirements.txt
 ```
 
-**`requirements.txt`**
-```
-pyrogram
-tgcrypto
-aria2p
-py7zr
-psutil
-aiohttp
-```
-
 ---
 
-## ⚙️ Configuration
-
-Set the following environment variables before running:
-
-| Variable | Required | Description |
-|---|---|---|
-| `API_ID` | ✅ | Telegram API ID — [my.telegram.org](https://my.telegram.org) |
-| `API_HASH` | ✅ | Telegram API Hash — [my.telegram.org](https://my.telegram.org) |
-| `BOT_TOKEN` | ✅ | Bot token — [@BotFather](https://t.me/BotFather) |
-| `OWNER_ID` | ✅ | Your Telegram user ID (get it from [@userinfobot](https://t.me/userinfobot)) |
-| `OWNER_PREMIUM` | ⚙️ | Set to `true` if you have Telegram Premium → enables 4 GB uploads (default: `false` = 2 GB) |
-| `PORT` | ⚙️ | Port for the keep-alive web server (default: `8000`, Koyeb sets this automatically) |
-
-### `.env` example
-
-```env
-API_ID=123456
-API_HASH=abcdef1234567890abcdef1234567890
-BOT_TOKEN=123456789:AABBCCDDEEFFaabbccddeeff
-OWNER_ID=987654321
-OWNER_PREMIUM=true
-PORT=8000
-```
-
----
-
-## 📤 Upload Size Limit
-
-The bot automatically picks the right limit based on the `OWNER_PREMIUM` flag:
-
-| `OWNER_PREMIUM` | Max file size |
-|---|---|
-| `false` (default) | **2 GB** — standard Telegram Bot API limit |
-| `true` | **4 GB** — Telegram Premium limit |
-
-> ⚠️ The **bot account itself does not need Premium** — only the owner/admin receiving the files needs a Premium account for 4 GB uploads to work.
-
----
-
-## 🚀 Running the Bot
-
-### 1. Start Aria2 RPC daemon
+## 🔧 Local Development
 
 ```bash
-aria2c --enable-rpc \
-       --rpc-listen-all=false \
-       --rpc-listen-port=6800 \
-       --rpc-secret="" \
-       --dir=/tmp/downloads \
-       --daemon
-```
+# 1. Clone the repo
+git clone https://github.com/yourname/leech-bot
+cd leech-bot
 
-### 2. Run the bot
+# 2. Install dependencies
+pip install -r requirements.txt
 
-```bash
-python3 leech_bot.py
-```
+# 3. Start aria2c manually
+aria2c --enable-rpc --rpc-secret=gjxml --daemon=true
 
----
+# 4. Set environment variables
+export API_ID=your_api_id
+export API_HASH=your_api_hash
+export BOT_TOKEN=your_bot_token
+export OWNER_ID=your_user_id
 
-## ☁️ Deploying on Koyeb
-
-The bot includes a built-in **aiohttp web server** that runs alongside the bot. Koyeb requires every service to expose an HTTP endpoint — this server satisfies that requirement and prevents the service from being killed.
-
-### Health check endpoints
-
-| Endpoint | Response |
-|---|---|
-| `GET /` | Bot status, active downloads, upload limit |
-| `GET /health` | Same as above |
-
-### Steps
-
-1. Push your code to GitHub
-2. Create a new **Koyeb** service → select your repo
-3. Set **Run command**: `python3 leech_bot.py`
-4. Set **Port**: `8000` (or leave blank — Koyeb injects `$PORT` automatically)
-5. Add all environment variables in the Koyeb dashboard
-6. Add a **Health check** pointing to `/health`
-7. Deploy 🚀
-
-### `Procfile` (optional)
-
-```
-web: aria2c --enable-rpc --rpc-listen-port=6800 --daemon && python3 leech_bot.py
+# 5. Run the bot
+python3 bot.py
 ```
 
 ---
 
-## 📊 Progress UI Examples
+## 📊 Progress UI Preview
 
-### Downloading
+**Downloading:**
 ```
-Task By @username ( #123456789 ) [Link]
-├ File → big_file.zip
-├ [●●●●●○○○○○] 51.3%
-├ Processed → 1.23GB of 2.40GB
+The.Movie.2025.mkv
+
+Task By @username ( #ID123456 ) [Link]
+├ [●●●●●●●○○○] 72.3%
+├ Processed → 1.96GB of 2.72GB
 ├ Status → Download
-├ Speed → 12.50MB/s
-├ Time → 0:01:42 ( 1m38s )
-├ Engine → ARIA2 v2.2.18
-├ In Mode → #aria2
+├ Speed → 5.66MB/s
+├ Time → 1m56s of 21m2s ( 19m6s )
+├ Seeders → 36 | Leechers → 46
+├ Engine → ARIA2 v1.36.0
+├ In Mode → #ARIA2
 ├ Out Mode → #Leech
-└ Stop → /stop_a1b2c3d4
+└ Stop → /stop_c2_6dd4
 
-📊 Bot Stats
-├ CPU → 8.20% | RAM → 1.40GB [52.3%]
-├ Disk → 42.50GB free of 100.00GB [57.5% used]
-└ UP → 3h12m5s
+© Bot Stats
+├ CPU → 100.0% | F → 245.37GB [69.9%]
+└ RAM → 58.4% | UP → 10h44m34s
 ```
 
-### Extracting
+**Uploading:**
 ```
-Task By @username ( #123456789 ) [Link]
-├ File → chapter_01.cbz
-├ Files → 14/47
-├ [●●●○○○○○○○] 29.8%
-├ Processed → 320.00MB of 1.07GB
-├ Status → Extracting
-├ Speed → 280.00MB/s
-├ Time → 1s ( 2s )
-├ Archive → big_file.zip
-└ Archive Size → 1.20GB
+The.Movie.2025.mkv
 
-📊 Bot Stats
-├ CPU → 22.10% | RAM → 1.80GB [66.2%]
-├ Disk → 38.20GB free of 100.00GB [61.8% used]
-└ UP → 3h13m44s
+Task By @username ( #ID123456 ) [Link]
+├ [●●●●●●●●●●] 100.0%
+├ Processed → 2.14GB of 2.14GB
+├ Status → Upload
+├ Speed → 595.40KB/s
+├ Time → of 1h3m41s ( 1h3m41s )
+├ Engine → Pyro v2.2.18
+├ In Mode → #Aria2
+├ Out Mode → #Leech
+└ Stop → /stop_c1_a0fa
+
+© Bot Stats
+├ CPU → 12.0% | F → 245.37GB [69.9%]
+└ RAM → 45.2% | UP → 10h44m34s
 ```
-
-### Uploading (concurrent)
-```
-Task By @username ( #123456789 ) [Link]
-├ Overall [●●●●●○○○○○] 48.2%
-├ Processed → 1.10GB of 2.28GB
-├ Status → Uploading (3 files simultaneously)
-├ `movie.mkv`  900MB/1.50GB  [●●●●●●○○○○] 60.0%
-├ `subs.zip`   180MB/360MB   [●●●●●○○○○○] 50.0%
-├ `info.nfo`   4MB/4MB       [●●●●●●●●●●] 100%
-
-📊 Bot Stats
-├ CPU → 15.10% | RAM → 1.60GB [59.8%]
-├ Disk → 40.00GB free of 100.00GB [60.0% used]
-└ UP → 3h14m22s
-```
-
----
-
-## 📁 Project Structure
-
-```
-leechbot/
-├── leech_bot.py      # Main bot file
-├── requirements.txt  # Python dependencies
-├── Procfile          # Koyeb / Heroku process file (optional)
-├── README.md         # This file
-└── .env              # Environment variables (never commit this)
-```
-
----
-
-## ⚠️ Limitations
-
-- Files larger than the configured limit (2 GB / 4 GB) are skipped with an error message
-- Aria2 must be running as an RPC daemon **before** starting the bot
-- Bot stores temporary files in `/tmp/downloads` — ensure enough disk space for your downloads
 
 ---
 
 ## 📝 License
 
-MIT License — free to use, modify, and distribute.
-
----
-
-<div align="center">
-  Made with ❤️ by <a href="https://github.com/GouthamSER">GouthamSER</a>
-</div>
+MIT — free to use and modify.
