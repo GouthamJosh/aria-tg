@@ -1,5 +1,5 @@
-pyrogram
-tgcrypto
+pyrofork
+TgCrypto
 aria2p
 aiohttp
 py7zr
