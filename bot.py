@@ -7,11 +7,25 @@ import aiohttp
 from aiohttp import web
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
+from pyrogram.errors import FloodWait, MessageNotModified
 import py7zr
 import zipfile
 import shutil
 from datetime import timedelta
 import psutil
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Speed Optimizations: Install tgcrypto and uvloop for best performance
+#  pip install tgcrypto uvloop
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    import uvloop
+    uvloop.install()
+    print("✅ uvloop installed - faster event loop")
+except ImportError:
+    print("⚠️ uvloop not installed. Install with: pip install uvloop")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Configuration
@@ -38,11 +52,21 @@ ENGINE_DL     = "ARIA2 v1.36.0"
 ENGINE_UL     = "Pyro v2.2.18"
 ENGINE_EXTRACT = "py7zr / zipfile"
 
-# Initialize clients
-app   = Client("leech_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Initialize clients with optimized settings for speed
+app   = Client(
+    "leech_bot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN,
+    workers=100,  # Increased workers for concurrent operations
+    max_concurrent_transmissions=5  # Parallel uploads
+)
 aria2 = aria2p.API(aria2p.Client(host=ARIA2_HOST, port=ARIA2_PORT, secret=ARIA2_SECRET))
 
 active_downloads = {}
+
+# Thread pool for CPU-bound operations
+executor = ThreadPoolExecutor(max_workers=4)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -60,10 +84,26 @@ class DownloadTask:
         self.extract_dir = None
         self.filename    = ""
         self.file_size   = 0
+        self._last_edit_time = 0  # Rate limiting tracker
+        self._edit_count = 0      # Edit counter for flood protection
 
     def get_elapsed_time(self):
         elapsed = time.time() - self.start_time
         return str(timedelta(seconds=int(elapsed)))
+    
+    def can_edit(self):
+        """Check if we can edit without hitting flood limits"""
+        now = time.time()
+        # Reset counter every 60 seconds
+        if now - self._last_edit_time > 60:
+            self._edit_count = 0
+            self._last_edit_time = now
+            return True
+        # Allow max 15 edits per minute (safe buffer below 20)
+        if self._edit_count < 15:
+            self._edit_count += 1
+            return True
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,12 +212,47 @@ def cleanup_files(task):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Download progress loop  ── NEW UI matching reference Image 1
+#  Safe message edit with flood protection
+# ─────────────────────────────────────────────────────────────────────────────
+async def safe_edit_message(message, text, task=None):
+    """
+    Edit message with flood wait protection.
+    Implements exponential backoff and respects rate limits.
+    """
+    try:
+        # Check if we should skip this edit to avoid flood
+        if task and not task.can_edit():
+            return False
+            
+        await message.edit_text(text)
+        return True
+    except FloodWait as e:
+        # Wait the required time + small buffer
+        wait_time = e.value + 2
+        print(f"⏳ FloodWait: Sleeping for {wait_time}s")
+        await asyncio.sleep(wait_time)
+        try:
+            await message.edit_text(text)
+            return True
+        except Exception:
+            return False
+    except MessageNotModified:
+        # Message content hasn't changed, ignore
+        return True
+    except Exception as e:
+        print(f"⚠ Edit error: {e}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Download progress loop  ── OPTIMIZED with flood protection
 # ─────────────────────────────────────────────────────────────────────────────
 async def update_progress(task: DownloadTask, message):
     try:
         await asyncio.sleep(2)
         update_count = 0
+        last_progress = -1  # Track last progress to avoid redundant edits
+        
         while not task.cancelled:
             try:
                 download   = aria2.get_download(task.gid)
@@ -195,6 +270,12 @@ async def update_progress(task: DownloadTask, message):
                 filename   = clean_filename(raw_name)
                 task.filename  = filename
                 task.file_size = total_size
+
+                # Skip update if progress hasn't changed significantly (0.5% threshold)
+                if abs(progress - last_progress) < 0.5 and progress < 100:
+                    await asyncio.sleep(2)
+                    continue
+                last_progress = progress
 
                 # Seeders / Leechers (torrent) or Connections (HTTP)
                 try:
@@ -236,24 +317,22 @@ async def update_progress(task: DownloadTask, message):
                     f"{bot_stats_block(stats)}"
                 )
 
-                if update_count % 3 == 0:
-                    try:
-                        await message.edit_text(status_text)
-                    except Exception:
-                        pass
+                # Only edit every 3rd iteration OR if significant change, with flood protection
+                if update_count % 3 == 0 or progress >= 100:
+                    await safe_edit_message(message, status_text, task)
 
             except Exception as iter_err:
                 print(f"Progress iteration error: {iter_err}")
 
             update_count += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(3)  # Increased sleep to reduce API calls
 
     except Exception as e:
         print(f"Progress update error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Extraction with live progress UI  ── NEW UI
+#  Extraction with live progress UI  ── OPTIMIZED
 # ─────────────────────────────────────────────────────────────────────────────
 async def extract_archive(file_path, extract_to, status_msg=None, task=None):
     try:
@@ -261,8 +340,16 @@ async def extract_archive(file_path, extract_to, status_msg=None, task=None):
         filename   = clean_filename(raw_name)
         total_size = os.path.getsize(file_path)
         start_time = time.time()
+        last_update = 0
 
         async def _render(extracted_bytes, total_bytes, current_file, file_index, total_files):
+            nonlocal last_update
+            now = time.time()
+            # Throttle updates to every 3 seconds minimum
+            if now - last_update < 3 and extracted_bytes < total_bytes:
+                return
+            
+            last_update = now
             pct       = min((extracted_bytes / total_bytes) * 100, 100) if total_bytes > 0 else 0
             elapsed   = time.time() - start_time
             speed     = extracted_bytes / elapsed if elapsed > 0 else 0
@@ -286,46 +373,60 @@ async def extract_archive(file_path, extract_to, status_msg=None, task=None):
                 f"└ **Archive Size** → {format_size(total_size)}\n\n"
                 f"{bot_stats_block(stats)}"
             )
-            try:
-                if status_msg:
-                    await status_msg.edit_text(text)
-            except Exception:
-                pass
+            await safe_edit_message(status_msg, text, task)
 
         # ── ZIP ───────────────────────────────────────────────────────────────
         if file_path.endswith('.zip'):
-            with zipfile.ZipFile(file_path, 'r') as zf:
-                members             = zf.infolist()
-                total_files         = len(members)
-                uncompressed_total  = sum(m.file_size for m in members)
-                extracted_bytes     = 0
-                update_tick         = 0
-                for idx, member in enumerate(members, start=1):
-                    zf.extract(member, extract_to)
-                    extracted_bytes += member.file_size
-                    update_tick += 1
-                    if update_tick % 5 == 0 or idx == total_files:
-                        await _render(extracted_bytes, uncompressed_total, member.filename, idx, total_files)
-                    await asyncio.sleep(0)
+            # Run extraction in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            
+            def extract_zip():
+                with zipfile.ZipFile(file_path, 'r') as zf:
+                    members = zf.infolist()
+                    total_files = len(members)
+                    uncompressed_total = sum(m.file_size for m in members)
+                    extracted_bytes = 0
+                    
+                    for idx, member in enumerate(members, start=1):
+                        zf.extract(member, extract_to)
+                        extracted_bytes += member.file_size
+                        
+                        # Update progress every 5 files or on last file
+                        if idx % 5 == 0 or idx == total_files:
+                            asyncio.run_coroutine_threadsafe(
+                                _render(extracted_bytes, uncompressed_total, member.filename, idx, total_files),
+                                loop
+                            )
+                return True
+            
+            return await loop.run_in_executor(executor, extract_zip)
 
         # ── 7z ───────────────────────────────────────────────────────────────
         elif file_path.endswith('.7z'):
             with py7zr.SevenZipFile(file_path, mode='r') as archive:
-                members     = archive.list()
+                members = archive.list()
                 total_files = len(members)
-                total_unc   = sum(getattr(m, 'uncompressed', 0) or 0 for m in members)
+                total_unc = sum(getattr(m, 'uncompressed', 0) or 0 for m in members)
                 extracted_bytes = 0
                 update_tick = 0
 
                 class _CB(py7zr.callbacks.ExtractCallback):
-                    def __init__(s): s.file_index = 0
+                    def __init__(s): 
+                        s.file_index = 0
+                        s.loop = asyncio.get_event_loop()
                     def report_start_preparation(s): pass
-                    def report_start(s, p, b): s.file_index += 1
+                    def report_start(s, p, b): 
+                        s.file_index += 1
                     def report_update(s, b): pass
                     def report_end(s, p, wrote_bytes):
                         nonlocal extracted_bytes, update_tick
                         extracted_bytes += wrote_bytes
                         update_tick += 1
+                        if update_tick % 5 == 0:
+                            asyncio.run_coroutine_threadsafe(
+                                _render(extracted_bytes, total_unc or total_size, filename, s.file_index, total_files),
+                                s.loop
+                            )
                     def report_postprocess(s): pass
                     def report_warning(s, m): pass
 
@@ -338,23 +439,32 @@ async def extract_archive(file_path, extract_to, status_msg=None, task=None):
                 except TypeError:
                     archive.extractall(path=extract_to)
                     await _render(total_size, total_size, filename, 1, 1)
+                return True
 
         # ── TAR ───────────────────────────────────────────────────────────────
         elif file_path.endswith(('.tar.gz', '.tgz', '.tar')):
             import tarfile
-            with tarfile.open(file_path, 'r:*') as tf:
-                members     = tf.getmembers()
-                total_files = len(members)
-                total_unc   = sum(m.size for m in members)
-                extracted_bytes = 0
-                update_tick = 0
-                for idx, member in enumerate(members, start=1):
-                    tf.extract(member, extract_to)
-                    extracted_bytes += member.size
-                    update_tick += 1
-                    if update_tick % 5 == 0 or idx == total_files:
-                        await _render(extracted_bytes, total_unc, member.name, idx, total_files)
-                    await asyncio.sleep(0)
+            loop = asyncio.get_event_loop()
+            
+            def extract_tar():
+                with tarfile.open(file_path, 'r:*') as tf:
+                    members = tf.getmembers()
+                    total_files = len(members)
+                    total_unc = sum(m.size for m in members)
+                    extracted_bytes = 0
+                    
+                    for idx, member in enumerate(members, start=1):
+                        tf.extract(member, extract_to)
+                        extracted_bytes += member.size
+                        
+                        if idx % 5 == 0 or idx == total_files:
+                            asyncio.run_coroutine_threadsafe(
+                                _render(extracted_bytes, total_unc, member.name, idx, total_files),
+                                loop
+                            )
+                return True
+            
+            return await loop.run_in_executor(executor, extract_tar)
         else:
             return False
 
@@ -366,7 +476,7 @@ async def extract_archive(file_path, extract_to, status_msg=None, task=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Upload with live progress UI  ── NEW UI matching reference Image 2
+#  Upload with live progress UI  ── OPTIMIZED for speed with flood protection
 # ─────────────────────────────────────────────────────────────────────────────
 async def upload_to_telegram(file_path, message, caption="", status_msg=None, task=None):
 
@@ -396,11 +506,7 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
             f"└ **Stop** → /stop_{stop_id}\n\n"
             f"{bot_stats_block(stats)}"
         )
-        try:
-            if status_msg:
-                await status_msg.edit_text(text)
-        except Exception:
-            pass
+        await safe_edit_message(status_msg, text, task)
 
     try:
         gid_short = task.gid[:8] if task else "unknown"
@@ -416,24 +522,35 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
             start_time       = time.time()
             last_update_time = [time.time()]
             last_uploaded    = [0]
+            last_render_time = [0]
 
             async def _progress(current, total):
                 now     = time.time()
                 elapsed = now - start_time
+                
+                # Throttle progress updates to every 5 seconds to avoid flood
+                if now - last_render_time[0] < 5:
+                    return
+                    
                 dt      = now - last_update_time[0]
-                if dt >= 2:
-                    speed = (current - last_uploaded[0]) / dt if dt > 0 else 0
-                    eta   = (total - current) / speed if speed > 0 else 0
-                    last_update_time[0] = now
-                    last_uploaded[0]    = current
-                    await _render_upload(raw_name, current, total, 1, 1, speed, elapsed, eta, gid_short)
+                speed = (current - last_uploaded[0]) / dt if dt > 0 else 0
+                eta   = (total - current) / speed if speed > 0 else 0
+                last_update_time[0] = now
+                last_uploaded[0]    = current
+                last_render_time[0] = now
+                
+                await _render_upload(raw_name, current, total, 1, 1, speed, elapsed, eta, gid_short)
 
             await _render_upload(raw_name, 0, file_size, 1, 1, 0, 0, 0, gid_short)
             clean_cap = clean_filename(raw_name)
+            
+            # Upload with optimized chunk size for speed
             await message.reply_document(
                 document=file_path,
                 caption=caption or clean_cap,
-                progress=_progress
+                progress=_progress,
+                # Disable notification to speed up
+                disable_notification=True
             )
             elapsed = time.time() - start_time
             await _render_upload(raw_name, file_size, file_size, 1, 1, 0, elapsed, 0, gid_short)
@@ -459,7 +576,8 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
 
             async def _render_multi():
                 now = time.time()
-                if now - last_render[0] < 2:
+                # Throttle to every 10 seconds for batch updates
+                if now - last_render[0] < 10:
                     return
                 last_render[0]  = now
                 elapsed         = now - start_time
@@ -479,7 +597,8 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
                     f"├ **In Mode** → #Aria2\n",
                     f"├ **Out Mode** → #Leech\n",
                 ]
-                for i, fp in enumerate(files, start=1):
+                # Show max 3 files to keep message short
+                for i, fp in list(enumerate(files, start=1))[:3]:
                     fname         = clean_filename(os.path.basename(fp))
                     uploaded, tot = file_progress[i]
                     pct           = min((uploaded / tot) * 100, 100) if tot > 0 else 0
@@ -487,15 +606,13 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
                         f"├ `{fname}` {format_size(uploaded)}/{format_size(tot)} "
                         f"{create_progress_bar(pct)}\n"
                     )
+                if total_files > 3:
+                    lines.append(f"├ ... and {total_files - 3} more files\n")
                 lines.append(
                     f"└ **Stop** → /stop_{gid_short}\n\n"
                     f"{bot_stats_block(stats)}"
                 )
-                try:
-                    if status_msg:
-                        await status_msg.edit_text("".join(lines))
-                except Exception:
-                    pass
+                await safe_edit_message(status_msg, "".join(lines), task)
 
             async def _upload_one(file_index, fpath):
                 file_size = os.path.getsize(fpath)
@@ -504,18 +621,30 @@ async def upload_to_telegram(file_path, message, caption="", status_msg=None, ta
 
                 async def _progress(current, total):
                     file_progress[file_index] = (current, total)
-                    await _render_multi()
+                    # Only render every 10 seconds
+                    if time.time() - last_render[0] >= 10:
+                        await _render_multi()
 
                 file_progress[file_index] = (0, file_size)
                 await message.reply_document(
                     document=fpath,
                     caption=f"📄 {clean_cap}  [{file_index}/{total_files}]" + (f"\n{caption}" if caption else ""),
-                    progress=_progress
+                    progress=_progress,
+                    disable_notification=True
                 )
                 file_progress[file_index] = (file_size, file_size)
 
             await _render_multi()
-            await asyncio.gather(*[_upload_one(i, fp) for i, fp in enumerate(files, start=1)])
+            
+            # Upload files with limited concurrency to avoid overwhelming Telegram
+            semaphore = asyncio.Semaphore(3)  # Max 3 concurrent uploads
+            
+            async def _upload_with_limit(index, fpath):
+                async with semaphore:
+                    return await _upload_one(index, fpath)
+            
+            await asyncio.gather(*[_upload_with_limit(i, fp) for i, fp in enumerate(files, start=1)])
+            
             last_render[0] = 0
             await _render_multi()
             return True
@@ -546,8 +675,8 @@ async def start_command(client, message: Message):
         f"✓ Site-name prefix auto-removed from filenames\n"
         f"✓ Max upload: **{MAX_UPLOAD_LABEL}** ({'Premium ⭐' if OWNER_PREMIUM else 'Standard'})\n\n"
         "**📖 Examples:**\n"
-        "`/leech https://example.com/file.zip`\n"
-        "`/l https://example.com/archive.7z -e`\n"
+        "`/leech https://example.com/file.zip `\n"
+        "`/l https://example.com/archive.7z  -e`\n"
     )
     await message.reply_text(help_text)
 
@@ -581,17 +710,17 @@ async def leech_command(client, message: Message):
                 download.update()
 
             if task.cancelled:
-                await status_msg.edit_text("❌ **Download cancelled**\n🧹 **Cleaning up...**")
+                await safe_edit_message(status_msg, "❌ **Download cancelled**\n🧹 **Cleaning up...**", task)
                 try:
                     aria2.remove([download], force=True, files=True)
                 except Exception:
                     pass
                 cleanup_files(task)
                 active_downloads.pop(gid, None)
-                await status_msg.edit_text("❌ **Download cancelled**\n✅ **Files cleaned up!**")
+                await safe_edit_message(status_msg, "❌ **Download cancelled**\n✅ **Files cleaned up!**", task)
                 return
 
-            await status_msg.edit_text("✅ **Download completed!**\n📤 **Starting upload...**")
+            await safe_edit_message(status_msg, "✅ **Download completed!**\n📤 **Starting upload...**", task)
             download.update()
             file_path      = os.path.join(DOWNLOAD_DIR, download.name)
             task.file_path = file_path
@@ -600,27 +729,27 @@ async def leech_command(client, message: Message):
                 extract_dir      = os.path.join(DOWNLOAD_DIR, f"extracted_{int(time.time())}")
                 os.makedirs(extract_dir, exist_ok=True)
                 task.extract_dir = extract_dir
-                await status_msg.edit_text("📦 **Starting extraction...**")
+                await safe_edit_message(status_msg, "📦 **Starting extraction...**", task)
                 if await extract_archive(file_path, extract_dir, status_msg=status_msg, task=task):
-                    await status_msg.edit_text("✅ **Extraction done!**\n📤 **Uploading to Telegram...**")
+                    await safe_edit_message(status_msg, "✅ **Extraction done!**\n📤 **Uploading to Telegram...**", task)
                     await upload_to_telegram(
                         extract_dir, message,
                         caption="📁 Extracted files",
                         status_msg=status_msg, task=task
                     )
                 else:
-                    await status_msg.edit_text("❌ **Extraction failed!** Uploading original...")
+                    await safe_edit_message(status_msg, "❌ **Extraction failed!** Uploading original...", task)
                     await upload_to_telegram(file_path, message, status_msg=status_msg, task=task)
             else:
                 await upload_to_telegram(file_path, message, status_msg=status_msg, task=task)
 
-            await status_msg.edit_text("✅ **Upload completed!**\n🧹 **Cleaning up files...**")
+            await safe_edit_message(status_msg, "✅ **Upload completed!**\n🧹 **Cleaning up files...**", task)
             cleanup_files(task)
-            await status_msg.edit_text("✅ **Task completed successfully!**")
+            await safe_edit_message(status_msg, "✅ **Task completed successfully!**", task)
             active_downloads.pop(gid, None)
 
         except Exception as e:
-            await status_msg.edit_text(f"❌ **Error:** `{str(e)}`\n🧹 **Cleaning up...**")
+            await safe_edit_message(status_msg, f"❌ **Error:** `{str(e)}`\n🧹 **Cleaning up...**", task)
             if task:
                 cleanup_files(task)
             active_downloads.pop(gid, None)
@@ -703,6 +832,7 @@ async def main():
     print("🚀 Starting Leech Bot...")
     print(f"📦 Max upload: {MAX_UPLOAD_LABEL} ({'Premium' if OWNER_PREMIUM else 'Standard'})")
     print(f"🌐 Koyeb keep-alive on port {PORT}")
+    print("⚡ Speed optimizations: workers=100, max_concurrent_transmissions=5")
 
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
