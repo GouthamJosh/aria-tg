@@ -30,9 +30,9 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-API_ID       = os.environ.get("API_ID", '18979569')
-API_HASH     = os.environ.get("API_HASH", '45db354387b8122bdf6c1b0beef93743')
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", '7531165057:AAHdKabrJwksXZj-2ev9zkRrV8BjAciE_Bw')
+API_ID       = os.environ.get("API_ID", '')
+API_HASH     = os.environ.get("API_HASH", '')
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", '')
 OWNER_ID     = int(os.environ.get("OWNER_ID", "6108995220"))
 DOWNLOAD_DIR = "/tmp/downloads"
 ARIA2_HOST   = "http://localhost"
