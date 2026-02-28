@@ -4,3 +4,4 @@ aria2p
 aiohttp
 py7zr
 psutil
+uvloop
