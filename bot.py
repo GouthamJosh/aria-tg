@@ -215,9 +215,9 @@ def clean_filename(filename: str) -> str:
 
 def create_progress_bar(percentage: float) -> str:
     if percentage >= 100:
-        return "[●●●●●●●●●●] 100%"
-    filled = int(percentage / 10)
-    return f"[{'●' * filled}{'○' * (10 - filled)}] {percentage:.1f}%"
+        return "[⬢⬢⬢⬢⬢⬢⬢⬢⬢⬢⬢⬢] 100%"
+    filled = int(percentage / 100 * 12)
+    return f"[{chr(11042) * filled}{chr(11041) * (12 - filled)}] {percentage:.1f}%"
 
 def format_speed(speed: float) -> str:
     if speed >= 1024 * 1024:
@@ -308,7 +308,8 @@ def build_dl_text(task: DownloadTask, user_label: str) -> str:
         f"{d['peer_line']}"
         f"├ **Engine** → {ENGINE_DL}\n"
         f"├ **In Mode** → #ARIA2\n"
-        f"└ **Out Mode** → #Leech\n\n"
+        f"├ **Out Mode** → #Leech\n"
+        f"└ **Stop** → `/stop_{gid_short}`\n\n"
         f"{bot_stats_block(stats)}"
     )
 
@@ -336,13 +337,15 @@ def build_ext_text(task: DownloadTask, user_label: str) -> str:
         f"├ **File** → {file_line}\n"
         f"├ **Engine** → {ENGINE_EXTRACT}\n"
         f"├ **In Mode** → #Extract\n"
-        f"└ **Out Mode** → #Leech\n\n"
+        f"├ **Out Mode** → #Leech\n"
+        f"└ **Stop** → `/stop_{gid_short}`\n\n"
         f"{bot_stats_block(stats)}"
     )
 
 
 def build_ul_text(task: DownloadTask, user_label: str) -> str:
     u         = task.ul
+    gid_short = task.gid[:8]
     stats     = get_system_stats()
 
     # ── Single file ──────────────────────────────────────────────────────────
@@ -359,7 +362,8 @@ def build_ul_text(task: DownloadTask, user_label: str) -> str:
             f"├ **Time** → {time_line}\n"
             f"├ **Engine** → {ENGINE_UL}\n"
             f"├ **In Mode** → #Aria2\n"
-            f"└ **Out Mode** → #Leech\n\n"
+            f"├ **Out Mode** → #Leech\n"
+            f"└ **Stop** → `/stop_{gid_short}`\n\n"
             f"{bot_stats_block(stats)}"
         )
 
@@ -393,7 +397,7 @@ def build_ul_text(task: DownloadTask, user_label: str) -> str:
         lines.append(f"├ `{fname}` {format_size(up)}/{format_size(tot)} {create_progress_bar(pct)}\n")
     if total_files > 3:
         lines.append(f"├ ... and {total_files - 3} more files\n")
-    lines.append(f"└ **Done** → {total_files} files\n\n{bot_stats_block(stats)}")
+    lines.append(f"├ **Stop** → `/stop_{gid_short}`\n└ **Done** → {total_files} files\n\n{bot_stats_block(stats)}")
     return "".join(lines)
 
 
