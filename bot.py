@@ -143,33 +143,66 @@ def build_task_block(task: DownloadTask, index: int) -> str:
                 f"\u2514 **Stop** \u2192 `/stop_{gs}`")
 
     if p == "ext":
-        e  = task.ext
-        sz = (f"{format_size(e['extracted'])} of {format_size(e['total'])}" if e["total"] > 0 else "Preparing...")
-        tl = f"Elapsed: {format_time(e['elapsed'])} | ETA: {format_time(e['remaining'])}"
-        ft = f"[{e['file_index']}/{e['total_files']}]" if e["total_files"] > 0 else ""
-        fl = f"`{e['cur_file']}`" if e["cur_file"] else "Preparing..."
-        return (f"**{index}. {e['filename'] or 'Extracting...'}**\n"
-                f"\u251c {create_progress_bar(e['pct'])}\n"
-                f"\u251c **Processed** \u2192 {sz}\n"
-                f"\u251c **Status** \u2192 Extracting {ft}\n"
-                f"\u251c **Speed** \u2192 {format_speed(e['speed'])}\n"
+        e   = task.ext
+        pct = e["pct"]
+        # Size line — show uncompressed extracted vs total, fallback to archive size
+        if e["total"] > 0:
+            sz = f"{format_size(e['extracted'])} of {format_size(e['total'])}"
+        elif e["archive_size"] > 0:
+            sz = f"Archive: {format_size(e['archive_size'])}"
+        else:
+            sz = "Preparing..."
+        tl  = f"Elapsed: {format_time(e['elapsed'])} | ETA: {format_time(e['remaining'])}"
+        # File counter badge — e.g.  📄 3 / 12
+        if e["total_files"] > 0:
+            ft = f"\U0001f4c4 {e['file_index']} / {e['total_files']} files"
+        else:
+            ft = "Scanning archive..."
+        # Current file — truncate long names neatly
+        cur = e["cur_file"]
+        if cur and len(cur) > 45:
+            cur = cur[:42] + "..."
+        fl = f"`{cur}`" if cur else "`preparing...`"
+        # Speed — extraction is CPU-bound so 0 B/s is common at start
+        sp = format_speed(e["speed"]) if e["speed"] > 0 else "Calculating..."
+        return (f"**{index}. \U0001f4e6 {e['filename'] or 'Extracting...'}**\n"
+                f"\u251c {create_progress_bar(pct)}\n"
+                f"\u251c **Extracted** \u2192 {sz}\n"
+                f"\u251c **Files** \u2192 {ft}\n"
+                f"\u251c **Status** \u2192 Extracting\n"
+                f"\u251c **Speed** \u2192 {sp}\n"
                 f"\u251c **Time** \u2192 {tl}\n"
-                f"\u251c **File** \u2192 {fl}\n"
+                f"\u251c **Current** \u2192 {fl}\n"
                 f"\u251c **Engine** \u2192 {ENGINE_EXTRACT} | **Mode** \u2192 #Extract \u2192 #Leech\n"
                 f"\u2514 **Stop** \u2192 `/stop_{gs}`")
 
     if p == "ul":
-        u  = task.ul
-        pc = min((u["uploaded"]/u["total"])*100, 100) if u["total"] > 0 else 0
-        tl = f"Elapsed: {format_time(u['elapsed'])} | ETA: {format_time(u['eta'])}"
-        return (f"**{index}. {clean_filename(u['filename'] or 'Uploading...')}**\n"
-                f"\u251c {create_progress_bar(pc)}\n"
-                f"\u251c **Processed** \u2192 {format_size(u['uploaded'])} of {format_size(u['total'])}\n"
-                f"\u251c **Status** \u2192 Upload\n"
-                f"\u251c **Speed** \u2192 {format_speed(u['speed'])}\n"
-                f"\u251c **Time** \u2192 {tl}\n"
-                f"\u251c **Engine** \u2192 {ENGINE_UL} | **Mode** \u2192 #Aria2 \u2192 #Leech\n"
-                f"\u2514 **Stop** \u2192 `/stop_{gs}`")
+        u   = task.ul
+        pc  = min((u["uploaded"] / u["total"]) * 100, 100) if u["total"] > 0 else 0
+        tl  = f"Elapsed: {format_time(u['elapsed'])} | ETA: {format_time(u['eta'])}"
+        # File counter for multi-file uploads
+        if u["total_files"] > 1:
+            fc_badge = f"\U0001f4c4 {u['file_index']} / {u['total_files']} files"
+        else:
+            fc_badge = None
+        fname = clean_filename(u["filename"] or "Uploading...")
+        lines = [
+            f"**{index}. \u2b06\ufe0f {fname}**\n",
+            f"\u251c {create_progress_bar(pc)}\n",
+            f"\u251c **Uploaded** \u2192 {format_size(u['uploaded'])} of {format_size(u['total'])}\n",
+        ]
+        if fc_badge:
+            lines.append(f"\u251c **Files** \u2192 {fc_badge}\n")
+        lines += [
+            f"\u251c **Status** \u2192 Upload\n",
+            f"\u251c **Speed** \u2192 {format_speed(u['speed'])}\n",
+            f"\u251c **Time** \u2192 {tl}\n",
+            f"\u251c **Engine** \u2192 {ENGINE_UL}\n",
+            f"\u251c **In Mode** \u2192 #Aria2\n",
+            f"\u251c **Out Mode** \u2192 #Leech\n",
+            f"\u2514 **Stop** \u2192 `/stop_{gs}`",
+        ]
+        return "".join(lines)
 
     return f"**{index}. Task** \u2192 Processing..."
 
@@ -389,7 +422,7 @@ async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = 
                     "file_index": fi, "total_files": fn,
                 })
                 now = time.time()
-                if now - last_push[0] >= 15:
+                if now - last_push[0] >= MIN_EDIT_GAP:
                     last_push[0] = now
                     await push_dashboard_update(task.user_id)
 
@@ -473,7 +506,7 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
 
             async def _progress(current, total):
                 now = time.time()
-                if now - lr[0] < 15: return
+                if now - lr[0] < MIN_EDIT_GAP: return
                 dt = now - lt[0]; speed = (current - lu[0]) / dt if dt > 0 else 0
                 eta = (total - current) / speed if speed > 0 else 0
                 lt[0] = now; lu[0] = current; lr[0] = now
@@ -494,15 +527,31 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             if not files:
                 await message.reply_text("\u274c No uploadable files found."); return False
             n = len(files)
+            total_bytes = sum(os.path.getsize(fp) for fp in files)
+            uploaded_bytes = 0
+            dir_start = time.time()
             for idx, fp in enumerate(files, 1):
                 raw = os.path.basename(fp); cn = clean_filename(raw)
                 if raw != cn:
                     np = os.path.join(os.path.dirname(fp), cn); os.rename(fp, np); fp = np
+                file_sz = os.path.getsize(fp)
+                # Update dashboard to show which file is being uploaded now
+                if task:
+                    elapsed = time.time() - dir_start
+                    spd = uploaded_bytes / elapsed if elapsed > 0 else 0
+                    eta = (total_bytes - uploaded_bytes) / spd if spd > 0 else 0
+                    task.ul.update({
+                        "filename": cn, "uploaded": uploaded_bytes, "total": total_bytes,
+                        "speed": spd, "elapsed": elapsed, "eta": eta,
+                        "file_index": idx, "total_files": n,
+                    })
+                    await push_dashboard_update(user_id)
                 cap = f"\U0001f4c4 {cn} [{idx}/{n}]"
                 if as_video and fp.lower().endswith(video_exts):
                     await message.reply_video(video=fp, caption=cap, disable_notification=True)
                 else:
                     await message.reply_document(document=fp, caption=cap, disable_notification=True)
+                uploaded_bytes += file_sz
             return True
 
     except Exception as e:
