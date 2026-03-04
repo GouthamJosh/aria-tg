@@ -64,7 +64,7 @@ class DownloadTask:
 def clean_filename(filename: str) -> str:
     c = re.sub(r'^\[.*?\]\s*|^\(.*?\)\s*', '', filename)
     c = re.sub(r'^@\w+\s*', '', c)
-    c = re.sub(r'^(?:(?:https?://)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?\s*[-\u2013_]*\s*)', '', c, flags=re.IGNORECASE)
+    c = re.sub(r'^(?:(?:https?://)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?\s*[-–_]*\s*)', '', c, flags=re.IGNORECASE)
     c = c.strip() if c.strip() else filename
     if len(c) > 100:
         name, ext = os.path.splitext(c)
@@ -102,9 +102,9 @@ def get_system_stats() -> dict:
     return {"cpu":cpu,"ram_percent":ram.percent,"uptime":format_time(up),"disk_free":disk.free/(1024**3),"disk_free_pct":100.0-disk.percent}
 
 def bot_stats_block(st: dict) -> str:
-    return (f"\u00a9 **Bot Stats**\n"
-            f"\u251c **CPU** \u2192 {st['cpu']:.1f}% | **F** \u2192 {st['disk_free']:.2f}GB [{st['disk_free_pct']:.1f}%]\n"
-            f"\u2514 **RAM** \u2192 {st['ram_percent']:.1f}% | **UP** \u2192 {st['uptime']}")
+    return (f"© **Bot Stats**\n"
+            f"├ **CPU** → {st['cpu']:.1f}% | **F** → {st['disk_free']:.2f}GB [{st['disk_free_pct']:.1f}%]\n"
+            f"└ **RAM** → {st['ram_percent']:.1f}% | **UP** → {st['uptime']}")
 
 def get_user_label(message: Message) -> str:
     try:
@@ -133,14 +133,14 @@ def build_task_block(task: DownloadTask, index: int) -> str:
               else f"{format_size(d['downloaded'])} of {format_size(d['total'])}")
         tl = f"Elapsed: {format_time(d['elapsed'])} | ETA: {format_time(d['eta'])}"
         return (f"**{index}. {d['filename'] or 'Connecting...'}**\n"
-                f"\u251c {create_progress_bar(d['progress'])}\n"
-                f"\u251c **Processed** \u2192 {sz}\n"
-                f"\u251c **Status** \u2192 Download\n"
-                f"\u251c **Speed** \u2192 {format_speed(d['speed'])}\n"
-                f"\u251c **Time** \u2192 {tl}\n"
+                f"├ {create_progress_bar(d['progress'])}\n"
+                f"├ **Processed** → {sz}\n"
+                f"├ **Status** → Download\n"
+                f"├ **Speed** → {format_speed(d['speed'])}\n"
+                f"├ **Time** → {tl}\n"
                 f"{d['peer_line']}"
-                f"\u251c **Engine** \u2192 {ENGINE_DL} | **Mode** \u2192 #ARIA2 \u2192 #Leech\n"
-                f"\u2514 **Stop** \u2192 `/stop_{gs}`")
+                f"├ **Engine** → {ENGINE_DL} | **Mode** → #ARIA2 → #Leech\n"
+                f"└ **Stop** → /stop_{gs}")
 
     if p == "ext":
         e   = task.ext
@@ -155,7 +155,7 @@ def build_task_block(task: DownloadTask, index: int) -> str:
         tl  = f"Elapsed: {format_time(e['elapsed'])} | ETA: {format_time(e['remaining'])}"
         # File counter badge — e.g.  📄 3 / 12
         if e["total_files"] > 0:
-            ft = f"\U0001f4c4 {e['file_index']} / {e['total_files']} files"
+            ft = f"📄 {e['file_index']} / {e['total_files']} files"
         else:
             ft = "Scanning archive..."
         # Current file — truncate long names neatly
@@ -165,16 +165,16 @@ def build_task_block(task: DownloadTask, index: int) -> str:
         fl = f"`{cur}`" if cur else "`preparing...`"
         # Speed — extraction is CPU-bound so 0 B/s is common at start
         sp = format_speed(e["speed"]) if e["speed"] > 0 else "Calculating..."
-        return (f"**{index}. \U0001f4e6 {e['filename'] or 'Extracting...'}**\n"
-                f"\u251c {create_progress_bar(pct)}\n"
-                f"\u251c **Extracted** \u2192 {sz}\n"
-                f"\u251c **Files** \u2192 {ft}\n"
-                f"\u251c **Status** \u2192 Extracting\n"
-                f"\u251c **Speed** \u2192 {sp}\n"
-                f"\u251c **Time** \u2192 {tl}\n"
-                f"\u251c **Current** \u2192 {fl}\n"
-                f"\u251c **Engine** \u2192 {ENGINE_EXTRACT} | **Mode** \u2192 #Extract \u2192 #Leech\n"
-                f"\u2514 **Stop** \u2192 `/stop_{gs}`")
+        return (f"**{index}. 📦 {e['filename'] or 'Extracting...'}**\n"
+                f"├ {create_progress_bar(pct)}\n"
+                f"├ **Extracted** → {sz}\n"
+                f"├ **Files** → {ft}\n"
+                f"├ **Status** → Extracting\n"
+                f"├ **Speed** → {sp}\n"
+                f"├ **Time** → {tl}\n"
+                f"├ **Current** → {fl}\n"
+                f"├ **Engine** → {ENGINE_EXTRACT} | **Mode** → #Extract → #Leech\n"
+                f"└ **Stop** → /stop_{gs}")
 
     if p == "ul":
         u   = task.ul
@@ -182,53 +182,53 @@ def build_task_block(task: DownloadTask, index: int) -> str:
         tl  = f"Elapsed: {format_time(u['elapsed'])} | ETA: {format_time(u['eta'])}"
         # File counter for multi-file uploads
         if u["total_files"] > 1:
-            fc_badge = f"\U0001f4c4 {u['file_index']} / {u['total_files']} files"
+            fc_badge = f"📄 {u['file_index']} / {u['total_files']} files"
         else:
             fc_badge = None
         fname = clean_filename(u["filename"] or "Uploading...")
         lines = [
-            f"**{index}. \u2b06\ufe0f {fname}**\n",
-            f"\u251c {create_progress_bar(pc)}\n",
-            f"\u251c **Uploaded** \u2192 {format_size(u['uploaded'])} of {format_size(u['total'])}\n",
+            f"**{index}. ⬆️ {fname}**\n",
+            f"├ {create_progress_bar(pc)}\n",
+            f"├ **Uploaded** → {format_size(u['uploaded'])} of {format_size(u['total'])}\n",
         ]
         if fc_badge:
-            lines.append(f"\u251c **Files** \u2192 {fc_badge}\n")
+            lines.append(f"├ **Files** → {fc_badge}\n")
         lines += [
-            f"\u251c **Status** \u2192 Upload\n",
-            f"\u251c **Speed** \u2192 {format_speed(u['speed'])}\n",
-            f"\u251c **Time** \u2192 {tl}\n",
-            f"\u251c **Engine** \u2192 {ENGINE_UL}\n",
-            f"\u251c **In Mode** \u2192 #Aria2\n",
-            f"\u251c **Out Mode** \u2192 #Leech\n",
-            f"\u2514 **Stop** \u2192 `/stop_{gs}`",
+            f"├ **Status** → Upload\n",
+            f"├ **Speed** → {format_speed(u['speed'])}\n",
+            f"├ **Time** → {tl}\n",
+            f"├ **Engine** → {ENGINE_UL}\n",
+            f"├ **In Mode** → #Aria2\n",
+            f"├ **Out Mode** → #Leech\n",
+            f"└ **Stop** → /stop_{gs}",
         ]
         return "".join(lines)
 
-    return f"**{index}. Task** \u2192 Processing..."
+    return f"**{index}. Task** → Processing..."
 
 
 def build_dashboard_text(user_id: int, user_label: str) -> str:
     tasks = [t for t in active_downloads.values() if t.user_id == user_id]
     if not tasks:
-        return "\u2705 **All tasks completed!**"
+        return "✅ **All tasks completed!**"
     stats  = get_system_stats()
-    div    = "\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+    div    = "\n─────────────────────\n"
     blocks = [build_task_block(t, i) for i, t in enumerate(tasks, 1)]
     body   = div.join(blocks)
     dl_c = sum(1 for t in tasks if t.current_phase == "dl")
     ex_c = sum(1 for t in tasks if t.current_phase == "ext")
     ul_c = sum(1 for t in tasks if t.current_phase == "ul")
     parts = []
-    if dl_c: parts.append(f"\u2b07\ufe0f {dl_c} downloading")
-    if ex_c: parts.append(f"\U0001f4e6 {ex_c} extracting")
-    if ul_c: parts.append(f"\u2b06\ufe0f {ul_c} uploading")
-    return (f"**Task By** {user_label} \u2014 {' | '.join(parts)}\n\n"
+    if dl_c: parts.append(f"⬇️ {dl_c} downloading")
+    if ex_c: parts.append(f"📦 {ex_c} extracting")
+    if ul_c: parts.append(f"⬆️ {ul_c} uploading")
+    return (f"**Task By** {user_label} — {' | '.join(parts)}\n\n"
             f"{body}\n\n"
             f"{bot_stats_block(stats)}")
 
 
 def dashboard_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f504 Refresh", callback_data=f"dash:{user_id}")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data=f"dash:{user_id}")]])
 
 
 async def edit_worker(user_id: int):
@@ -255,7 +255,7 @@ async def edit_worker(user_id: int):
         except FloodWait as e:
             ws = e.value + 3
             dash["flood_until"] = time.time() + ws
-            print(f"\u26a0\ufe0f FloodWait {e.value}s user {user_id} — edit worker sleeping {ws}s")
+            print(f"⚠️ FloodWait {e.value}s user {user_id} — edit worker sleeping {ws}s")
             await asyncio.sleep(ws)
         except MessageNotModified:
             dash["last_text"] = text
@@ -304,13 +304,13 @@ async def dashboard_loop(user_id: int):
                 try: q.put_nowait(None)
                 except Exception: pass
             try:
-                await dash["msg"].edit_text("\u2705 **All tasks completed!**", reply_markup=None)
+                await dash["msg"].edit_text("✅ **All tasks completed!**", reply_markup=None)
             except Exception: pass
             user_dashboards.pop(user_id, None)
             break
         if time.time() < dash.get("flood_until", 0):
             left = int(dash["flood_until"] - time.time())
-            print(f"\u23f3 FloodWait active user {user_id} \u2014 {left}s left, skipping tick")
+            print(f"⏳ FloodWait active user {user_id} — {left}s left, skipping tick")
             continue
         now = time.time()
         if now - dash.get("last_edit_at", 0) < MIN_EDIT_GAP:
@@ -323,7 +323,7 @@ async def get_or_create_dashboard(user_id: int, trigger_msg: Message, user_label
     if dash:
         dash["user_label"] = user_label
         return dash["msg"]
-    msg = await trigger_msg.reply_text("\u23f3 **Initialising...**", reply_markup=dashboard_keyboard(user_id))
+    msg = await trigger_msg.reply_text("⏳ **Initialising...**", reply_markup=dashboard_keyboard(user_id))
     user_dashboards[user_id] = {
         "msg": msg, "flood_until": 0.0, "user_label": user_label,
         "last_text": "", "last_edit_at": 0.0,
@@ -338,16 +338,16 @@ async def dashboard_refresh_callback(client, cq: CallbackQuery):
     user_id = int(uid)
     dash = user_dashboards.get(user_id)
     if not dash:
-        await cq.answer("\u26a0\ufe0f No active tasks.", show_alert=True)
+        await cq.answer("⚠️ No active tasks.", show_alert=True)
         return
     now = time.time()
     if now < dash.get("flood_until", 0):
         left = int(dash["flood_until"] - now)
-        await cq.answer(f"\u23f3 Rate limit active \u2014 auto-refresh resumes in {left}s", show_alert=True)
+        await cq.answer(f"⏳ Rate limit active — auto-refresh resumes in {left}s", show_alert=True)
         return
     if now - dash.get("last_edit_at", 0) < MIN_EDIT_GAP:
         gap = int(MIN_EDIT_GAP - (now - dash.get("last_edit_at", 0)))
-        await cq.answer(f"\u23f3 Please wait {gap}s between refreshes.", show_alert=True)
+        await cq.answer(f"⏳ Please wait {gap}s between refreshes.", show_alert=True)
         return
     text = build_dashboard_text(user_id, dash.get("user_label", f"#ID{user_id}"))
     kb   = dashboard_keyboard(user_id)
@@ -355,15 +355,15 @@ async def dashboard_refresh_callback(client, cq: CallbackQuery):
         await cq.edit_message_text(text, reply_markup=kb)
         dash["last_text"]    = text
         dash["last_edit_at"] = time.time()
-        await cq.answer("\u2705 Refreshed!")
+        await cq.answer("")
     except FloodWait as e:
         ws = e.value + 3
         dash["flood_until"] = time.time() + ws
-        await cq.answer(f"\u26a0\ufe0f Rate limit ({e.value}s). Auto-refresh will continue.", show_alert=True)
+        await cq.answer(f"⚠️ Rate limit ({e.value}s). Auto-refresh will continue.", show_alert=True)
     except MessageNotModified:
-        await cq.answer("\u2139\ufe0f Already up to date.")
+        await cq.answer("ℹ️ Already up to date.")
     except Exception as e:
-        await cq.answer(f"\u274c {e}", show_alert=True)
+        await cq.answer(f"❌ {e}", show_alert=True)
 
 
 async def poll_download_progress(task: DownloadTask):
@@ -388,9 +388,9 @@ async def poll_download_progress(task: DownloadTask):
             try:
                 s = getattr(dl, "num_seeders", None)
                 if s and int(s) > 0:
-                    task.dl["peer_line"] = f"\u251c **Seeders** \u2192 {s} | **Leechers** \u2192 {dl.connections or 0}\n"
+                    task.dl["peer_line"] = f"├ **Seeders** → {s} | **Leechers** → {dl.connections or 0}\n"
                 else:
-                    task.dl["peer_line"] = f"\u251c **Connections** \u2192 {dl.connections or 0}\n"
+                    task.dl["peer_line"] = f"├ **Connections** → {dl.connections or 0}\n"
             except Exception:
                 task.dl["peer_line"] = ""
         except Exception:
@@ -492,7 +492,7 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
         if os.path.isfile(file_path):
             fs = os.path.getsize(file_path)
             if fs > MAX_UPLOAD_BYTES:
-                await message.reply_text(f"\u274c File too large (>{MAX_UPLOAD_LABEL})")
+                await message.reply_text(f"❌ File too large (>{MAX_UPLOAD_LABEL})")
                 return False
             raw = os.path.basename(file_path); cn = clean_filename(raw)
             if raw != cn:
@@ -525,7 +525,7 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             files = [os.path.join(r, f) for r, _, fs2 in os.walk(file_path) for f in fs2
                      if os.path.getsize(os.path.join(r, f)) <= MAX_UPLOAD_BYTES]
             if not files:
-                await message.reply_text("\u274c No uploadable files found."); return False
+                await message.reply_text("❌ No uploadable files found."); return False
             n = len(files)
             total_bytes = sum(os.path.getsize(fp) for fp in files)
             uploaded_bytes = 0
@@ -546,7 +546,7 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
                         "file_index": idx, "total_files": n,
                     })
                     await push_dashboard_update(user_id)
-                cap = f"\U0001f4c4 {cn} [{idx}/{n}]"
+                cap = f"📄 {cn} [{idx}/{n}]"
                 if as_video and fp.lower().endswith(video_exts):
                     await message.reply_video(video=fp, caption=cap, disable_notification=True)
                 else:
@@ -555,7 +555,7 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             return True
 
     except Exception as e:
-        await message.reply_text(f"\u274c Upload error: {str(e)}")
+        await message.reply_text(f"❌ Upload error: {str(e)}")
         return False
 
 
@@ -579,7 +579,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
             if cdl.is_complete: break
             elif getattr(cdl, "has_failed", False):
                 active_downloads.pop(task.gid, None)
-                await message.reply_text(f"\u274c **Aria2 Error:** `{cdl.error_message}`")
+                await message.reply_text(f"❌ **Aria2 Error:** `{cdl.error_message}`")
                 cleanup_files(task); await push_dashboard_update(task.user_id); return
 
         if task.cancelled:
@@ -597,7 +597,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         if extract and fp.endswith((".zip", ".7z", ".tar.gz", ".tgz", ".tar")):
             ed = os.path.join(DOWNLOAD_DIR, f"extracted_{int(time.time())}")
             os.makedirs(ed, exist_ok=True); task.extract_dir = ed
-            us, cap = (ed, "\U0001f4c1 Extracted files") if await extract_archive(fp, ed, task=task) else (fp, "")
+            us, cap = (ed, "📁 Extracted files") if await extract_archive(fp, ed, task=task) else (fp, "")
         else:
             us, cap = fp, ""
 
@@ -606,7 +606,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         await push_dashboard_update(task.user_id)
 
     except Exception as e:
-        await message.reply_text(f"\u274c **Error:** `{str(e)}`")
+        await message.reply_text(f"❌ **Error:** `{str(e)}`")
         cleanup_files(task); active_downloads.pop(task.gid, None)
         await push_dashboard_update(task.user_id)
 
@@ -630,7 +630,7 @@ async def universal_leech_command(client, message: Message):
     args  = message.text.split()[1:]
     links = [a for a in args if a.startswith("http") or a.startswith("magnet:")]
     if not links:
-        await message.reply_text("\u274c **Usage:** `/ql <link1> <link2>` or reply to a `.torrent` file.\n\u274c `/l <link>` for direct links"); return
+        await message.reply_text("❌ **Usage:** `/ql <link1> <link2>` or reply to a `.torrent` file.\n❌ `/l <link>` for direct links"); return
 
     for link in links:
         try:
@@ -639,7 +639,7 @@ async def universal_leech_command(client, message: Message):
             task = DownloadTask(dl.gid, user_id, extract)
             asyncio.create_task(process_task_execution(message, task, dl, extract))
         except Exception as e:
-            await message.reply_text(f"\u274c **Failed to add:** `{str(e)}`")
+            await message.reply_text(f"❌ **Failed to add:** `{str(e)}`")
 
 
 @app.on_message(filters.document)
@@ -656,7 +656,7 @@ async def handle_torrent_document(client, message: Message):
         task = DownloadTask(dl.gid, user_id, extract)
         asyncio.create_task(process_task_execution(message, task, dl, extract))
     except Exception as e:
-        await message.reply_text(f"\u274c **Error processing torrent:** `{str(e)}`")
+        await message.reply_text(f"❌ **Error processing torrent:** `{str(e)}`")
 
 
 @app.on_message(filters.command(["stop"]) | filters.regex(r"^/stop_\w+"))
@@ -666,56 +666,56 @@ async def stop_command(client, message: Message):
         gid_short = (text.split("_", 1)[1].strip() if text.startswith("/stop_")
                      else (text.split(maxsplit=1)[1].strip() if len(text.split()) > 1 else None))
         if not gid_short:
-            await message.reply_text("\u274c **Usage:** `/stop <task_id>`"); return
+            await message.reply_text("❌ **Usage:** `/stop <task_id>`"); return
         found_task = found_gid = None
         for gid, t in list(active_downloads.items()):
             if gid.startswith(gid_short) or gid[:8] == gid_short:
                 found_task = t; found_gid = gid; break
         if not found_task:
-            await message.reply_text(f"\u274c **Task `{gid_short}` not found!**"); return
+            await message.reply_text(f"❌ **Task `{gid_short}` not found!**"); return
         found_task.cancelled = True
         try:
             aria2.remove([aria2.get_download(found_task.gid)], force=True, files=True)
             cleanup_files(found_task)
         except Exception as e: print(f"Stop error: {e}")
         active_downloads.pop(found_gid, None); active_downloads.pop(found_task.gid, None)
-        await message.reply_text(f"\u2705 **Task `{gid_short}` cancelled & files cleaned!**")
+        await message.reply_text(f"✅ **Task `{gid_short}` cancelled & files cleaned!**")
         await push_dashboard_update(found_task.user_id)
     except Exception as e:
-        await message.reply_text(f"\u274c **Error:** `{str(e)}`")
+        await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
 
 @app.on_message(filters.command(["start"]))
 async def start_command(client, message: Message):
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("\u2699\ufe0f Upload Settings", callback_data=f"toggle_mode:{message.from_user.id}")],
-        [InlineKeyboardButton("\U0001f5d1 Close", callback_data="close_help")]
+        [InlineKeyboardButton("⚙️ Upload Settings", callback_data=f"toggle_mode:{message.from_user.id}")],
+        [InlineKeyboardButton("🗑 Close", callback_data="close_help")]
     ])
     await message.reply_text(
-        "**\U0001f916 Welcome to the Advanced Leech Bot!**\n\n"
+        "**🤖 Welcome to the Advanced Leech Bot!**\n\n"
         "Download direct links, magnets, and `.torrent` files and upload them to Telegram.\n\n"
-        "Type /help for all commands.\n\n\u00a9 Maintained By @im_goutham_josh", reply_markup=kb)
+        "Type /help for all commands.\n\n© Maintained By @im_goutham_josh", reply_markup=kb)
 
 
 @app.on_message(filters.command(["help"]))
 async def help_command(client, message: Message):
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f5d1 Close", callback_data="close_help")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Close", callback_data="close_help")]])
     await message.reply_text(
-        "**\U0001f4d6 Leech Bot \u2014 Help & Commands**\n\n"
-        "**\U0001f4e5 Commands:**\n"
-        "\u2022 `/ql <link1> <link2>` \u2014 Download multiple links at once\n"
-        "\u2022 `/leech <link>` \u2014 Standard download\n"
-        "\u2022 `/leech <link> -e` \u2014 Download & auto-extract archive\n"
-        "\u2022 **Upload a `.torrent` file** directly to start\n\n"
-        "**\u2699\ufe0f Control:**\n"
-        "\u2022 `/settings` \u2014 Toggle Document / Video upload mode\n"
-        "\u2022 `/stop <task_id>` \u2014 Cancel an active task\n\n"
-        "**\u2728 Features:**\n"
-        "\u2713 ONE dashboard message shows ALL active tasks\n"
-        "\u2713 Auto-refreshes every 15s automatically\n"
-        "\u2713 FloodWait eliminated via serialised edit queue\n"
-        "\u2713 20 supercharged trackers + 200 max peers\n"
-        "\u2713 Smart filename cleaning", reply_markup=kb)
+        "**📖 Leech Bot — Help & Commands**\n\n"
+        "**📥 Commands:**\n"
+        "• `/ql <link1> <link2>` — Download multiple links at once\n"
+        "• `/leech <link>` — Standard download\n"
+        "• `/leech <link> -e` — Download & auto-extract archive\n"
+        "• **Upload a `.torrent` file** directly to start\n\n"
+        "**⚙️ Control:**\n"
+        "• `/settings` — Toggle Document / Video upload mode\n"
+        "• `/stop <task_id>` — Cancel an active task\n\n"
+        "**✨ Features:**\n"
+        "✓ ONE dashboard message shows ALL active tasks\n"
+        "✓ Auto-refreshes every 15s automatically\n"
+        "✓ FloodWait eliminated via serialised edit queue\n"
+        "✓ 20 supercharged trackers + 200 max peers\n"
+        "✓ Smart filename cleaning", reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex(r"^close_help$"))
@@ -728,30 +728,30 @@ async def close_help_callback(client, cq: CallbackQuery):
 async def settings_command(client, message: Message):
     uid = message.from_user.id
     av  = user_settings.get(uid, {}).get("as_video", False)
-    mt  = "\U0001f3ac Video (Playable)" if av else "\U0001f4c4 Document (File)"
+    mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
     kb  = InlineKeyboardMarkup([[InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]])
-    await message.reply_text("\u2699\ufe0f **Upload Settings**\n\nChoose how video files (.mp4, .mkv, .webm) are sent.", reply_markup=kb)
+    await message.reply_text("⚙️ **Upload Settings**\n\nChoose how video files (.mp4, .mkv, .webm) are sent.", reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex(r"^toggle_mode:"))
 async def toggle_mode_callback(client, cq: CallbackQuery):
     _, uid_str = cq.data.split(":"); uid = int(uid_str)
     if cq.from_user.id != uid:
-        await cq.answer("\u274c These aren't your settings!", show_alert=True); return
+        await cq.answer("❌ These aren't your settings!", show_alert=True); return
     cur = user_settings.get(uid, {}).get("as_video", False)
     user_settings.setdefault(uid, {})["as_video"] = not cur
-    mt = "\U0001f3ac Video (Playable)" if not cur else "\U0001f4c4 Document (File)"
+    mt = "🎬 Video (Playable)" if not cur else "📄 Document (File)"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")],
-        [InlineKeyboardButton("\U0001f5d1 Close", callback_data="close_help")]
+        [InlineKeyboardButton("🗑 Close", callback_data="close_help")]
     ])
     await cq.edit_message_reply_markup(reply_markup=kb)
-    await cq.answer(f"\u2705 Switched to {mt}!")
+    await cq.answer(f"✅ Switched to {mt}!")
 
 
 async def health_handler(request):
     return web.Response(text=(
-        "\u2705 Leech Bot is alive\n"
+        "✅ Leech Bot is alive\n"
         f"Active downloads : {len(active_downloads)}\n"
         f"Active dashboards: {len(user_dashboards)}\n"
         f"Upload limit     : {MAX_UPLOAD_LABEL} ({'Premium' if OWNER_PREMIUM else 'Standard'})\n"
@@ -764,18 +764,18 @@ async def start_web_server():
     wa.router.add_get("/", health_handler); wa.router.add_get("/health", health_handler)
     runner = web.AppRunner(wa); await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    print(f"\U0001f310 Keep-alive server on port {PORT}")
+    print(f"🌐 Keep-alive server on port {PORT}")
 
 
 async def main():
-    print("\U0001f680 Starting Leech Bot...")
-    print(f"\U0001f4e6 Max upload      : {MAX_UPLOAD_LABEL} ({'Premium' if OWNER_PREMIUM else 'Standard'})")
-    print(f"\U0001f504 Auto-refresh     : every {DASHBOARD_REFRESH_INTERVAL}s")
-    print(f"\u23f1\ufe0f  Min edit gap    : {MIN_EDIT_GAP}s")
+    print("🚀 Starting Leech Bot...")
+    print(f"📦 Max upload      : {MAX_UPLOAD_LABEL} ({'Premium' if OWNER_PREMIUM else 'Standard'})")
+    print(f"🔄 Auto-refresh     : every {DASHBOARD_REFRESH_INTERVAL}s")
+    print(f"⏱️  Min edit gap    : {MIN_EDIT_GAP}s")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     await app.start()
     await start_web_server()
-    print("\U0001f916 Bot ready \u2014 listening for commands...")
+    print("🤖 Bot ready — listening for commands...")
     await idle()
     await app.stop()
 
