@@ -20,7 +20,7 @@ from config import (
     PORT, ENGINE_DL, ENGINE_UL, ENGINE_EXTRACT,
     DASHBOARD_REFRESH_INTERVAL, MIN_EDIT_GAP,
     WORKERS, MAX_CONCURRENT_TRANSMISSIONS,
-    BT_OPTIONS, DIRECT_OPTIONS,
+    BT_OPTIONS, DIRECT_OPTIONS, TASKS_PER_PAGE
 )
 
 try:
@@ -43,7 +43,6 @@ user_settings    = {}
 user_dashboards  = {}
 user_edit_queues = {}
 
-
 class DownloadTask:
     def __init__(self, gid: str, user_id: int, extract: bool = False):
         self.gid           = gid
@@ -61,6 +60,7 @@ class DownloadTask:
         self.ul  = {"filename":"","uploaded":0,"total":0,"speed":0,"elapsed":0,"eta":0,"file_index":1,"total_files":1}
 
 
+# ── Utility helpers ───────────────────────────────────────────────────────────
 def clean_filename(filename: str) -> str:
     c = re.sub(r'^\[.*?\]\s*|^\(.*?\)\s*', '', filename)
     c = re.sub(r'^@\w+\s*', '', c)
@@ -123,6 +123,7 @@ def cleanup_files(task: DownloadTask):
         print(f"Cleanup error: {e}")
 
 
+# ── Task block renderer ───────────────────────────────────────────────────────
 def build_task_block(task: DownloadTask, index: int) -> str:
     gs = task.gid[:8]
     p  = task.current_phase
@@ -145,7 +146,6 @@ def build_task_block(task: DownloadTask, index: int) -> str:
     if p == "ext":
         e   = task.ext
         pct = e["pct"]
-        # Size line — show uncompressed extracted vs total, fallback to archive size
         if e["total"] > 0:
             sz = f"{format_size(e['extracted'])} of {format_size(e['total'])}"
         elif e["archive_size"] > 0:
@@ -153,18 +153,11 @@ def build_task_block(task: DownloadTask, index: int) -> str:
         else:
             sz = "Preparing..."
         tl  = f"Elapsed: {format_time(e['elapsed'])} | ETA: {format_time(e['remaining'])}"
-        # File counter badge — e.g.  📄 3 / 12
-        if e["total_files"] > 0:
-            ft = f"📄 {e['file_index']} / {e['total_files']} files"
-        else:
-            ft = "Scanning archive..."
-        # Current file — truncate long names neatly
+        ft  = f"📄 {e['file_index']} / {e['total_files']} files" if e["total_files"] > 0 else "Scanning archive..."
         cur = e["cur_file"]
-        if cur and len(cur) > 45:
-            cur = cur[:42] + "..."
-        fl = f"`{cur}`" if cur else "`preparing...`"
-        # Speed — extraction is CPU-bound so 0 B/s is common at start
-        sp = format_speed(e["speed"]) if e["speed"] > 0 else "Calculating..."
+        if cur and len(cur) > 45: cur = cur[:42] + "..."
+        fl  = f"`{cur}`" if cur else "`preparing...`"
+        sp  = format_speed(e["speed"]) if e["speed"] > 0 else "Calculating..."
         return (f"**{index}. 📦 {e['filename'] or 'Extracting...'}**\n"
                 f"├ {create_progress_bar(pct)}\n"
                 f"├ **Extracted** → {sz}\n"
@@ -180,11 +173,7 @@ def build_task_block(task: DownloadTask, index: int) -> str:
         u   = task.ul
         pc  = min((u["uploaded"] / u["total"]) * 100, 100) if u["total"] > 0 else 0
         tl  = f"Elapsed: {format_time(u['elapsed'])} | ETA: {format_time(u['eta'])}"
-        # File counter for multi-file uploads
-        if u["total_files"] > 1:
-            fc_badge = f"📄 {u['file_index']} / {u['total_files']} files"
-        else:
-            fc_badge = None
+        fc_badge = f"📄 {u['file_index']} / {u['total_files']} files" if u["total_files"] > 1 else None
         fname = clean_filename(u["filename"] or "Uploading...")
         lines = [
             f"**{index}. ⬆️ {fname}**\n",
@@ -207,14 +196,30 @@ def build_task_block(task: DownloadTask, index: int) -> str:
     return f"**{index}. Task** → Processing..."
 
 
-def build_dashboard_text(user_id: int, user_label: str) -> str:
+# ── Paginated dashboard builder ───────────────────────────────────────────────
+def get_total_pages(user_id: int) -> int:
+    tasks = [t for t in active_downloads.values() if t.user_id == user_id]
+    if not tasks: return 1
+    return max(1, (len(tasks) + TASKS_PER_PAGE - 1) // TASKS_PER_PAGE)
+
+
+def build_dashboard_text(user_id: int, user_label: str, page: int = 0) -> str:
     tasks = [t for t in active_downloads.values() if t.user_id == user_id]
     if not tasks:
         return "✅ **All tasks completed!**"
+
+    total_pages = max(1, (len(tasks) + TASKS_PER_PAGE - 1) // TASKS_PER_PAGE)
+    page        = max(0, min(page, total_pages - 1))   # clamp
+
+    start      = page * TASKS_PER_PAGE
+    page_tasks = tasks[start: start + TASKS_PER_PAGE]
+
     stats  = get_system_stats()
     div    = "\n─────────────────────\n"
-    blocks = [build_task_block(t, i) for i, t in enumerate(tasks, 1)]
+    # Global index so task numbers are continuous across pages (1-based)
+    blocks = [build_task_block(t, start + i) for i, t in enumerate(page_tasks, 1)]
     body   = div.join(blocks)
+
     dl_c = sum(1 for t in tasks if t.current_phase == "dl")
     ex_c = sum(1 for t in tasks if t.current_phase == "ext")
     ul_c = sum(1 for t in tasks if t.current_phase == "ul")
@@ -222,32 +227,54 @@ def build_dashboard_text(user_id: int, user_label: str) -> str:
     if dl_c: parts.append(f"⬇️ {dl_c} downloading")
     if ex_c: parts.append(f"📦 {ex_c} extracting")
     if ul_c: parts.append(f"⬆️ {ul_c} uploading")
-    return (f"**Task By** {user_label} — {' | '.join(parts)}\n\n"
+
+    page_label = f"  •  Page {page + 1} / {total_pages}" if total_pages > 1 else ""
+    return (f"**Task By** {user_label} — {' | '.join(parts)}{page_label}\n\n"
             f"{body}\n\n"
             f"{bot_stats_block(stats)}")
 
 
-def dashboard_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data=f"dash:{user_id}")]])
+def dashboard_keyboard(user_id: int, page: int = 0, total_pages: int = 1) -> InlineKeyboardMarkup:
+    """
+    When total_pages > 1:
+      Row 1:  ◀ Prev  |  📄 X / Y  |  Next ▶
+    Row 2 (always):  🔄 Refresh
+    """
+    buttons = []
+    if total_pages > 1:
+        nav = []
+        nav.append(InlineKeyboardButton(
+            "◀ Prev" if page > 0 else "◀",
+            callback_data=f"dpage:{user_id}:{max(0, page - 1)}"
+        ))
+        nav.append(InlineKeyboardButton(
+            f"📄 {page + 1} / {total_pages}",
+            callback_data="noop"
+        ))
+        nav.append(InlineKeyboardButton(
+            "Next ▶" if page < total_pages - 1 else "▶",
+            callback_data=f"dpage:{user_id}:{min(total_pages - 1, page + 1)}"
+        ))
+        buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"dash:{user_id}")])
+    return InlineKeyboardMarkup(buttons)
 
 
+# ── FloodWait-safe edit queue ─────────────────────────────────────────────────
 async def edit_worker(user_id: int):
     """Serialised edit queue — one coroutine per user, enforces MIN_EDIT_GAP."""
     q = user_edit_queues[user_id]
     while True:
         item = await q.get()
         if item is None:
-            q.task_done()
-            break
+            q.task_done(); break
         text, kb = item
         dash = user_dashboards.get(user_id)
         if not dash:
-            q.task_done()
-            break
+            q.task_done(); break
         if text == dash.get("last_text", ""):
-            q.task_done()
-            await asyncio.sleep(1)
-            continue
+            q.task_done(); await asyncio.sleep(1); continue
         try:
             await dash["msg"].edit_text(text, reply_markup=kb)
             dash["last_text"]    = text
@@ -267,13 +294,20 @@ async def edit_worker(user_id: int):
 
 async def _enqueue_edit(user_id: int):
     dash = user_dashboards.get(user_id)
-    if not dash:
-        return
-    if time.time() < dash.get("flood_until", 0):
-        return
-    text = build_dashboard_text(user_id, dash.get("user_label", f"#ID{user_id}"))
-    if text == dash.get("last_text", ""):
-        return
+    if not dash: return
+    if time.time() < dash.get("flood_until", 0): return
+
+    page        = dash.get("page", 0)
+    total_pages = get_total_pages(user_id)
+    # Snap back if current page is now out of range (tasks finished)
+    if page >= total_pages:
+        page = max(0, total_pages - 1)
+        dash["page"] = page
+
+    text = build_dashboard_text(user_id, dash.get("user_label", f"#ID{user_id}"), page)
+    kb   = dashboard_keyboard(user_id, page, total_pages)
+    if text == dash.get("last_text", ""): return
+
     if user_id not in user_edit_queues:
         user_edit_queues[user_id] = asyncio.Queue(maxsize=2)
         asyncio.create_task(edit_worker(user_id))
@@ -282,7 +316,7 @@ async def _enqueue_edit(user_id: int):
         try: q.get_nowait(); q.task_done()
         except Exception: break
     try:
-        q.put_nowait((text, dashboard_keyboard(user_id)))
+        q.put_nowait((text, kb))
     except asyncio.QueueFull:
         pass
 
@@ -295,8 +329,7 @@ async def dashboard_loop(user_id: int):
     while True:
         await asyncio.sleep(DASHBOARD_REFRESH_INTERVAL)
         dash = user_dashboards.get(user_id)
-        if not dash:
-            break
+        if not dash: break
         user_tasks = [t for t in active_downloads.values() if t.user_id == user_id]
         if not user_tasks:
             q = user_edit_queues.pop(user_id, None)
@@ -313,8 +346,7 @@ async def dashboard_loop(user_id: int):
             print(f"⏳ FloodWait active user {user_id} — {left}s left, skipping tick")
             continue
         now = time.time()
-        if now - dash.get("last_edit_at", 0) < MIN_EDIT_GAP:
-            continue
+        if now - dash.get("last_edit_at", 0) < MIN_EDIT_GAP: continue
         await _enqueue_edit(user_id)
 
 
@@ -323,42 +355,45 @@ async def get_or_create_dashboard(user_id: int, trigger_msg: Message, user_label
     if dash:
         dash["user_label"] = user_label
         return dash["msg"]
-    msg = await trigger_msg.reply_text("⏳ **Initialising...**", reply_markup=dashboard_keyboard(user_id))
+    msg = await trigger_msg.reply_text(
+        "⏳ **Initialising...**",
+        reply_markup=dashboard_keyboard(user_id, 0, 1),
+    )
     user_dashboards[user_id] = {
         "msg": msg, "flood_until": 0.0, "user_label": user_label,
         "last_text": "", "last_edit_at": 0.0,
+        "page": 0,      # ← current visible page (0-indexed)
     }
     asyncio.create_task(dashboard_loop(user_id))
     return msg
 
 
+# ── Callback: Refresh ─────────────────────────────────────────────────────────
 @app.on_callback_query(filters.regex(r"^dash:"))
 async def dashboard_refresh_callback(client, cq: CallbackQuery):
     _, uid = cq.data.split(":", 1)
     user_id = int(uid)
     dash = user_dashboards.get(user_id)
     if not dash:
-        await cq.answer("⚠️ No active tasks.", show_alert=True)
-        return
+        await cq.answer("⚠️ No active tasks.", show_alert=True); return
     now = time.time()
     if now < dash.get("flood_until", 0):
         left = int(dash["flood_until"] - now)
-        await cq.answer(f"⏳ Rate limit active — auto-refresh resumes in {left}s", show_alert=True)
-        return
+        await cq.answer(f"⏳ Rate limit active — auto-refresh resumes in {left}s", show_alert=True); return
     if now - dash.get("last_edit_at", 0) < MIN_EDIT_GAP:
         gap = int(MIN_EDIT_GAP - (now - dash.get("last_edit_at", 0)))
-        await cq.answer(f"⏳ Please wait {gap}s between refreshes.", show_alert=True)
-        return
-    text = build_dashboard_text(user_id, dash.get("user_label", f"#ID{user_id}"))
-    kb   = dashboard_keyboard(user_id)
+        await cq.answer(f"⏳ Please wait {gap}s between refreshes.", show_alert=True); return
+
+    page        = dash.get("page", 0)
+    total_pages = get_total_pages(user_id)
+    text = build_dashboard_text(user_id, dash.get("user_label", f"#ID{user_id}"), page)
+    kb   = dashboard_keyboard(user_id, page, total_pages)
     try:
         await cq.edit_message_text(text, reply_markup=kb)
-        dash["last_text"]    = text
-        dash["last_edit_at"] = time.time()
+        dash["last_text"] = text; dash["last_edit_at"] = time.time()
         await cq.answer("")
     except FloodWait as e:
-        ws = e.value + 3
-        dash["flood_until"] = time.time() + ws
+        ws = e.value + 3; dash["flood_until"] = time.time() + ws
         await cq.answer(f"⚠️ Rate limit ({e.value}s). Auto-refresh will continue.", show_alert=True)
     except MessageNotModified:
         await cq.answer("ℹ️ Already up to date.")
@@ -366,13 +401,59 @@ async def dashboard_refresh_callback(client, cq: CallbackQuery):
         await cq.answer(f"❌ {e}", show_alert=True)
 
 
+# ── Callback: Page navigation ─────────────────────────────────────────────────
+@app.on_callback_query(filters.regex(r"^dpage:"))
+async def dashboard_page_callback(client, cq: CallbackQuery):
+    parts    = cq.data.split(":")      # ["dpage", uid, page]
+    user_id  = int(parts[1])
+    new_page = int(parts[2])
+    dash = user_dashboards.get(user_id)
+    if not dash:
+        await cq.answer("⚠️ No active tasks.", show_alert=True); return
+
+    total_pages = get_total_pages(user_id)
+    new_page    = max(0, min(new_page, total_pages - 1))
+
+    if new_page == dash.get("page", 0):
+        await cq.answer(); return     # already on this page
+
+    now = time.time()
+    if now < dash.get("flood_until", 0):
+        left = int(dash["flood_until"] - now)
+        await cq.answer(f"⏳ Rate limit — resumes in {left}s", show_alert=True); return
+    if now - dash.get("last_edit_at", 0) < MIN_EDIT_GAP:
+        gap = int(MIN_EDIT_GAP - (now - dash.get("last_edit_at", 0)))
+        await cq.answer(f"⏳ Please wait {gap}s.", show_alert=True); return
+
+    dash["page"] = new_page
+    text = build_dashboard_text(user_id, dash.get("user_label", f"#ID{user_id}"), new_page)
+    kb   = dashboard_keyboard(user_id, new_page, total_pages)
+    try:
+        await cq.edit_message_text(text, reply_markup=kb)
+        dash["last_text"] = text; dash["last_edit_at"] = time.time()
+        await cq.answer(f"📄 Page {new_page + 1} / {total_pages}")
+    except FloodWait as e:
+        ws = e.value + 3; dash["flood_until"] = time.time() + ws
+        await cq.answer(f"⚠️ Rate limit ({e.value}s).", show_alert=True)
+    except MessageNotModified:
+        await cq.answer()
+    except Exception as e:
+        await cq.answer(f"❌ {e}", show_alert=True)
+
+
+# ── Callback: no-op (page label button — tapping shows nothing) ───────────────
+@app.on_callback_query(filters.regex(r"^noop$"))
+async def noop_callback(client, cq: CallbackQuery):
+    await cq.answer()
+
+
+# ── Download progress poller ──────────────────────────────────────────────────
 async def poll_download_progress(task: DownloadTask):
     await asyncio.sleep(2)
     while not task.cancelled:
         try:
             dl = aria2.get_download(task.gid)
-            if dl.is_complete:
-                break
+            if dl.is_complete: break
             _eta = dl.eta
             task.dl.update({
                 "filename":   clean_filename(dl.name if dl.name else "Connecting..."),
@@ -398,6 +479,7 @@ async def poll_download_progress(task: DownloadTask):
         await asyncio.sleep(3)
 
 
+# ── Extract archive ───────────────────────────────────────────────────────────
 async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = None) -> bool:
     try:
         filename   = clean_filename(os.path.basename(file_path))
@@ -481,6 +563,7 @@ async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = 
         return False
 
 
+# ── Upload to Telegram ────────────────────────────────────────────────────────
 async def upload_to_telegram(file_path: str, message: Message, caption: str = "", task: DownloadTask = None) -> bool:
     if task:
         task.current_phase = "ul"
@@ -535,7 +618,6 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
                 if raw != cn:
                     np = os.path.join(os.path.dirname(fp), cn); os.rename(fp, np); fp = np
                 file_sz = os.path.getsize(fp)
-                # Update dashboard to show which file is being uploaded now
                 if task:
                     elapsed = time.time() - dir_start
                     spd = uploaded_bytes / elapsed if elapsed > 0 else 0
@@ -559,6 +641,7 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
         return False
 
 
+# ── Core task processor ───────────────────────────────────────────────────────
 async def process_task_execution(message: Message, task: DownloadTask, download, extract: bool):
     gid = download.gid; task.gid = gid
     active_downloads[gid] = task
@@ -611,6 +694,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         await push_dashboard_update(task.user_id)
 
 
+# ── Bot commands ──────────────────────────────────────────────────────────────
 @app.on_message(filters.command(["leech", "l", "ql"]))
 async def universal_leech_command(client, message: Message):
     extract = "-e" in message.text.lower()
@@ -711,8 +795,8 @@ async def help_command(client, message: Message):
         "• `/settings` — Toggle Document / Video upload mode\n"
         "• `/stop <task_id>` — Cancel an active task\n\n"
         "**✨ Features:**\n"
-        "✓ ONE dashboard message shows ALL active tasks\n"
-        "✓ Auto-refreshes every 15s automatically\n"
+        "✓ Paginated dashboard — 4 tasks per page with ◀ Prev / Next ▶\n"
+        "✓ ONE dashboard message per user, auto-refreshes every 15s\n"
         "✓ FloodWait eliminated via serialised edit queue\n"
         "✓ 20 supercharged trackers + 200 max peers\n"
         "✓ Smart filename cleaning", reply_markup=kb)
@@ -749,11 +833,13 @@ async def toggle_mode_callback(client, cq: CallbackQuery):
     await cq.answer(f"✅ Switched to {mt}!")
 
 
+# ── Keep-alive web server ─────────────────────────────────────────────────────
 async def health_handler(request):
     return web.Response(text=(
         "✅ Leech Bot is alive\n"
         f"Active downloads : {len(active_downloads)}\n"
         f"Active dashboards: {len(user_dashboards)}\n"
+        f"Tasks per page   : {TASKS_PER_PAGE}\n"
         f"Upload limit     : {MAX_UPLOAD_LABEL} ({'Premium' if OWNER_PREMIUM else 'Standard'})\n"
         f"Edit interval    : {MIN_EDIT_GAP}s min gap / {DASHBOARD_REFRESH_INTERVAL}s auto-refresh"
     ), content_type="text/plain")
@@ -770,8 +856,9 @@ async def start_web_server():
 async def main():
     print("🚀 Starting Leech Bot...")
     print(f"📦 Max upload      : {MAX_UPLOAD_LABEL} ({'Premium' if OWNER_PREMIUM else 'Standard'})")
-    print(f"🔄 Auto-refresh     : every {DASHBOARD_REFRESH_INTERVAL}s")
-    print(f"⏱️  Min edit gap    : {MIN_EDIT_GAP}s")
+    print(f"🔄 Auto-refresh    : every {DASHBOARD_REFRESH_INTERVAL}s")
+    print(f"⏱️  Min edit gap   : {MIN_EDIT_GAP}s")
+    print(f"📄 Tasks per page  : {TASKS_PER_PAGE}")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     await app.start()
     await start_web_server()
