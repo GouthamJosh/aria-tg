@@ -50,13 +50,13 @@ ENGINE_EXTRACT = "py7zr / zipfile"
 #  These two settings together make FloodWait physically impossible.
 # ─────────────────────────────────────────────────────────────────────────────
 DASHBOARD_REFRESH_INTERVAL = int(os.environ.get("DASHBOARD_REFRESH_INTERVAL", "15"))
-MIN_EDIT_GAP               = int(os.environ.get("MIN_EDIT_GAP", "12"))
+MIN_EDIT_GAP               = int(os.environ.get("MIN_EDIT_GAP", "5"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Pyrogram Client Settings
 # ─────────────────────────────────────────────────────────────────────────────
-WORKERS                    = int(os.environ.get("WORKERS", "300"))
-MAX_CONCURRENT_TRANSMISSIONS = int(os.environ.get("MAX_CONCURRENT_TRANSMISSIONS", "15"))
+WORKERS                    = int(os.environ.get("WORKERS", "400"))
+MAX_CONCURRENT_TRANSMISSIONS = int(os.environ.get("MAX_CONCURRENT_TRANSMISSIONS", "20"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Aria2 Torrent / BitTorrent Options
