@@ -169,26 +169,47 @@ install_requirements() {
 install_requirements
 
 # ── Build tracker list ───────────────────────────────────────────────────────
+# Tier 1 — high-reliability UDP
 TRACKERS="udp://tracker.opentrackr.org:1337/announce"
+TRACKERS="$TRACKERS,udp://open.tracker.cl:1337/announce"
+TRACKERS="$TRACKERS,udp://open.demonii.com:1337/announce"
+TRACKERS="$TRACKERS,udp://exodus.desync.com:6969/announce"
+TRACKERS="$TRACKERS,udp://open.stealth.si:80/announce"
+TRACKERS="$TRACKERS,udp://tracker.torrent.eu.org:451/announce"
 TRACKERS="$TRACKERS,udp://tracker.openbittorrent.com:6969/announce"
 TRACKERS="$TRACKERS,http://tracker.openbittorrent.com:80/announce"
-TRACKERS="$TRACKERS,udp://tracker.torrent.eu.org:451/announce"
-TRACKERS="$TRACKERS,udp://exodus.desync.com:6969/announce"
-TRACKERS="$TRACKERS,udp://tracker.cyberia.is:6969/announce"
-TRACKERS="$TRACKERS,udp://open.demonii.com:1337/announce"
-TRACKERS="$TRACKERS,udp://9.rarbg.com:2810/announce"
 TRACKERS="$TRACKERS,udp://tracker.moeking.me:6969/announce"
-TRACKERS="$TRACKERS,udp://tracker.lelux.fi:6969/announce"
-TRACKERS="$TRACKERS,udp://retracker.lanta-net.ru:2710/announce"
-TRACKERS="$TRACKERS,udp://opentor.net:2710/announce"
 TRACKERS="$TRACKERS,udp://tracker.dler.org:6969/announce"
+# Tier 2 — solid secondary UDP
+TRACKERS="$TRACKERS,udp://9.rarbg.com:2810/announce"
 TRACKERS="$TRACKERS,udp://tracker.tiny-vps.com:6969/announce"
-TRACKERS="$TRACKERS,https://tracker.tamersunion.org:443/announce"
-TRACKERS="$TRACKERS,https://tracker.loligirl.cn:443/announce"
+TRACKERS="$TRACKERS,udp://tracker.cyberia.is:6969/announce"
+TRACKERS="$TRACKERS,udp://opentor.net:2710/announce"
 TRACKERS="$TRACKERS,udp://tracker.theoks.net:6969/announce"
 TRACKERS="$TRACKERS,udp://tracker1.bt.moack.co.kr:80/announce"
-TRACKERS="$TRACKERS,udp://open.stealth.si:80/announce"
 TRACKERS="$TRACKERS,udp://tracker.zemoj.com:6969/announce"
+TRACKERS="$TRACKERS,udp://tracker.lelux.fi:6969/announce"
+TRACKERS="$TRACKERS,udp://retracker.lanta-net.ru:2710/announce"
+TRACKERS="$TRACKERS,udp://bt1.archive.org:6969/announce"
+TRACKERS="$TRACKERS,udp://bt2.archive.org:6969/announce"
+TRACKERS="$TRACKERS,udp://tracker.uw0.xyz:6969/announce"
+TRACKERS="$TRACKERS,udp://tracker.coppersurfer.tk:6969/announce"
+TRACKERS="$TRACKERS,udp://tracker.leechers-paradise.org:6969/announce"
+TRACKERS="$TRACKERS,udp://tracker.pirateparty.gr:6969/announce"
+TRACKERS="$TRACKERS,udp://ipv4.tracker.harry.lu:80/announce"
+TRACKERS="$TRACKERS,udp://tracker.internetwarriors.net:1337/announce"
+TRACKERS="$TRACKERS,udp://tracker.zer0day.to:1337/announce"
+TRACKERS="$TRACKERS,udp://tracker.mg64.net:6969/announce"
+TRACKERS="$TRACKERS,udp://peerfect.org:6969/announce"
+# Tier 3 — HTTPS
+TRACKERS="$TRACKERS,https://tracker.tamersunion.org:443/announce"
+TRACKERS="$TRACKERS,https://tracker.loligirl.cn:443/announce"
+TRACKERS="$TRACKERS,https://tracker.gbitt.info:443/announce"
+TRACKERS="$TRACKERS,https://1337.abcvg.info:443/announce"
+TRACKERS="$TRACKERS,https://tr.burnbit.com:443/announce"
+TRACKERS="$TRACKERS,http://tracker.gbitt.info:80/announce"
+TRACKERS="$TRACKERS,http://open.acgnxtracker.com:80/announce"
+TRACKERS="$TRACKERS,http://tracker.bt4g.com:2095/announce"
 
 # ── Start Aria2c RPC ─────────────────────────────────────────────────────────
 echo "🚀 Starting Aria2c RPC daemon..."
@@ -205,6 +226,7 @@ aria2c \
     --rpc-listen-port="$RPC_PORT" \
     --rpc-secret="$ARIA2_SECRET" \
     --rpc-max-request-size=16M \
+    --rpc-allow-origin-all=true \
     --dir=/tmp/downloads \
     \
     `# ── General Download ────────────────────────────────` \
@@ -215,7 +237,8 @@ aria2c \
     --continue=true \
     --auto-file-renaming=false \
     --allow-overwrite=true \
-    --disk-cache=64M \
+    --async-dns=true \
+    --disk-cache=128M \
     --file-allocation=none \
     --max-overall-download-limit=0 \
     --max-overall-upload-limit=1K \
@@ -223,17 +246,22 @@ aria2c \
     `# ── Torrent / Magnet ────────────────────────────────` \
     --enable-dht=true \
     --enable-dht6=true \
-    --dht-listen-port=6881-6889 \
+    --dht-listen-port=6881-6999 \
     --enable-peer-exchange=true \
     --bt-enable-lpd=true \
-    --bt-max-peers=200 \
-    --bt-request-peer-speed-limit=50M \
+    --bt-max-peers=500 \
+    --bt-request-peer-speed-limit=100M \
     --bt-save-metadata=true \
+    --bt-load-saved-metadata=true \
+    --bt-hash-check-seed=false \
     --bt-seed-unverified=true \
-    --bt-prioritize-piece=head=2M,tail=2M \
+    --bt-prioritize-piece=head=4M,tail=4M \
     --bt-remove-unselected-file=true \
     --seed-time=0 \
+    --seed-ratio=0.0 \
     --follow-torrent=true \
+    --peer-agent="aria2/1.37.0" \
+    --peer-id-prefix="-AR1370-" \
     --bt-tracker="$TRACKERS" \
     \
     `# ── Logging ─────────────────────────────────────────` \
