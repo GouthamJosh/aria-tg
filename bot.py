@@ -327,7 +327,7 @@ async def push_dashboard_update(user_id: int):
 
 async def dashboard_loop(user_id: int):
     while True:
-        await asyncio.sleep(10)   # auto-refresh every 10s
+        await asyncio.sleep(DASHBOARD_REFRESH_INTERVAL)
         dash = user_dashboards.get(user_id)
         if not dash: break
         user_tasks = [t for t in active_downloads.values() if t.user_id == user_id]
