@@ -63,24 +63,56 @@ class DownloadTask:
 # ── Utility helpers ───────────────────────────────────────────────────────────
 def clean_filename(filename: str) -> str:
     c = filename
-    # remove [tag] or (tag) at start
     c = re.sub(r'^\[.*?\]\s*|^\(.*?\)\s*', '', c)
-    # remove @username
     c = re.sub(r'^@\w+\s*', '', c)
     c = re.sub(r'https?://\S+', '', c)
     c = re.sub(r'^(?:https?://)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:[._\-\s]+)', '', c, flags=re.IGNORECASE)
-    # remove leftover domain patterns anywhere in name
     c = re.sub(r'(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|info|xyz|site|club)', '', c, flags=re.IGNORECASE)
     c = c.strip(" .-_")
     if not c:
         c = filename
-    # limit length
     if len(c) > 120:
         name, ext = os.path.splitext(c)
         sl = 120 - len(ext) - 3
         c = (name[:sl] + "..." + ext) if sl > 0 else c[:120]
     return c
-    
+
+def smart_episode_name(file_path: str, base_dir: str) -> str:
+    """
+    If a file is named just 'S01E01.mkv' inside a folder like
+    'ShowName.S01.720p.WEB-DL/', returns 'ShowName.S01E01.mkv'.
+    Falls back to original filename for non-episode or already-named files.
+    """
+    filename = os.path.basename(file_path)
+    name, ext = os.path.splitext(filename)
+
+    if not re.match(r'^S\d+E\d+', name, re.IGNORECASE):
+        return clean_filename(filename)
+
+    rel    = os.path.relpath(file_path, base_dir).replace("\\", "/")
+    parts  = rel.split("/")
+    parent = parts[0] if len(parts) > 1 else ""
+    if not parent:
+        return clean_filename(filename)
+
+    show_match = re.match(
+        r'^(.*?)(?:[._\s](?:S\d{2}|720p|1080p|480p|405p|WEB|AMZN|HDRip|BluRay|DD|AAC|H\.264|x264))',
+        parent, re.IGNORECASE
+    )
+    show_name = (show_match.group(1) if show_match
+                 else re.split(r'[._]S\d{2}', parent)[0]).strip("._- ")
+
+    if not show_name:
+        return clean_filename(filename)
+
+    season_m  = re.search(r'(S\d{2})', parent, re.IGNORECASE)
+    episode_m = re.match(r'S\d+(E\d+)', name, re.IGNORECASE)
+    season    = season_m.group(1).upper()  if season_m  else ""
+    episode   = episode_m.group(1).upper() if episode_m else name.upper()
+
+    result = f"{show_name}.{season}{episode}{ext}" if season else f"{show_name}.{name}{ext}"
+    return clean_filename(result)
+
 def create_progress_bar(pct: float) -> str:
     if pct >= 100: return "[" + chr(11042)*12 + "] 100%"
     f = int(pct / 100 * 12)
@@ -108,21 +140,14 @@ def get_system_stats() -> dict:
     up   = time.time() - psutil.boot_time()
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     disk = psutil.disk_usage(DOWNLOAD_DIR)
-    dl_speed = ul_speed = 0
-    try:
-        gs = aria2.get_global_stat()
-        dl_speed = int(getattr(gs, "download_speed", 0) or 0)
-        ul_speed = int(getattr(gs, "upload_speed", 0) or 0)
-    except Exception:
-        pass
     return {
         "cpu":           cpu,
         "ram_percent":   ram.percent,
         "uptime":        format_time(up),
         "disk_free":     disk.free / (1024**3),
         "disk_free_pct": 100.0 - disk.percent,
-        "dl_speed":      dl_speed,
-        "ul_speed":      ul_speed,
+        "dl_speed":      0,
+        "ul_speed":      0,
     }
 
 def bot_stats_block(st: dict, task_count: int = 0) -> str:
@@ -237,16 +262,17 @@ def build_dashboard_text(user_id: int, user_label: str, page: int = 0) -> str:
         return "✅ **All tasks completed!**"
 
     total_pages = max(1, (len(tasks) + TASKS_PER_PAGE - 1) // TASKS_PER_PAGE)
-    page        = max(0, min(page, total_pages - 1))   # clamp
+    page        = max(0, min(page, total_pages - 1))
 
     start      = page * TASKS_PER_PAGE
     page_tasks = tasks[start: start + TASKS_PER_PAGE]
 
     stats  = get_system_stats()
+    # Real speeds from active task objects
     stats["dl_speed"] = sum(t.dl["speed"] for t in tasks if t.current_phase == "dl")
     stats["ul_speed"] = sum(t.ul["speed"] for t in tasks if t.current_phase == "ul")
+
     div    = "\n\n"
-    # Global index so task numbers are continuous across pages (1-based)
     blocks = [build_task_block(t, start + i) for i, t in enumerate(page_tasks, 1)]
     body   = div.join(blocks)
 
@@ -265,11 +291,6 @@ def build_dashboard_text(user_id: int, user_label: str, page: int = 0) -> str:
 
 
 def dashboard_keyboard(user_id: int, page: int = 0, total_pages: int = 1) -> InlineKeyboardMarkup:
-    """
-    When total_pages > 1:
-      Row 1:  ◀ Prev  |  📄 X / Y  |  Next ▶
-    Row 2 (always):  🔄 Refresh
-    """
     buttons = []
     if total_pages > 1:
         nav = []
@@ -286,14 +307,12 @@ def dashboard_keyboard(user_id: int, page: int = 0, total_pages: int = 1) -> Inl
             callback_data=f"dpage:{user_id}:{min(total_pages - 1, page + 1)}"
         ))
         buttons.append(nav)
-
     buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"dash:{user_id}")])
     return InlineKeyboardMarkup(buttons)
 
 
 # ── FloodWait-safe edit queue ─────────────────────────────────────────────────
 async def edit_worker(user_id: int):
-    """Serialised edit queue — one coroutine per user, enforces MIN_EDIT_GAP."""
     q = user_edit_queues[user_id]
     while True:
         item = await q.get()
@@ -329,7 +348,6 @@ async def _enqueue_edit(user_id: int):
 
     page        = dash.get("page", 0)
     total_pages = get_total_pages(user_id)
-    # Snap back if current page is now out of range (tasks finished)
     if page >= total_pages:
         page = max(0, total_pages - 1)
         dash["page"] = page
@@ -389,17 +407,17 @@ async def get_or_create_dashboard(user_id: int, trigger_msg: Message, user_label
     user_dashboards[user_id] = {
         "msg": msg, "flood_until": 0.0, "user_label": user_label,
         "last_text": "", "last_edit_at": 0.0,
-        "page": 0,      # ← current visible page (0-indexed)
+        "page": 0,
     }
     asyncio.create_task(dashboard_loop(user_id))
     return msg
 
 async def safe_answer(cq, text: str = "", show_alert: bool = False):
-    """Answer a callback query, silently ignoring expired query ID errors."""
     try:
         await cq.answer(text, show_alert=show_alert)
     except (QueryIdInvalid, Exception):
         pass
+
 
 # ── Callback: Refresh ─────────────────────────────────────────────────────────
 @app.on_callback_query(filters.regex(r"^dash:"))
@@ -433,10 +451,11 @@ async def dashboard_refresh_callback(client, cq: CallbackQuery):
     except Exception as e:
         await safe_answer(cq, f"❌ {e}", show_alert=True)
 
-# ── Callback: Page navigation (NO rate limit — instant switch) ────────────────
+
+# ── Callback: Page navigation ─────────────────────────────────────────────────
 @app.on_callback_query(filters.regex(r"^dpage:"))
 async def dashboard_page_callback(client, cq: CallbackQuery):
-    parts    = cq.data.split(":")      # ["dpage", uid, page]
+    parts    = cq.data.split(":")
     user_id  = int(parts[1])
     new_page = int(parts[2])
     dash = user_dashboards.get(user_id)
@@ -447,7 +466,7 @@ async def dashboard_page_callback(client, cq: CallbackQuery):
     new_page    = max(0, min(new_page, total_pages - 1))
 
     if new_page == dash.get("page", 0):
-        await safe_answer(cq); return     # already on this page
+        await safe_answer(cq); return
 
     dash["page"] = new_page
     text = build_dashboard_text(user_id, dash.get("user_label", f"#ID{user_id}"), new_page)
@@ -464,10 +483,12 @@ async def dashboard_page_callback(client, cq: CallbackQuery):
     except Exception as e:
         await safe_answer(cq, f"❌ {e}", show_alert=True)
 
-# ── Callback: no-op (page label button — tapping shows nothing) ───────────────
+
+# ── Callback: no-op ───────────────────────────────────────────────────────────
 @app.on_callback_query(filters.regex(r"^noop$"))
 async def noop_callback(client, cq: CallbackQuery):
     await safe_answer(cq)
+
 
 # ── Download progress poller ──────────────────────────────────────────────────
 async def poll_download_progress(task: DownloadTask):
@@ -499,46 +520,94 @@ async def poll_download_progress(task: DownloadTask):
         except Exception:
             pass
         await asyncio.sleep(3)
-# ── Smart episode name: combines show name from parent folder + episode code ──
-def smart_episode_name(file_path: str, base_dir: str) -> str:
-    """
-    If a file is named just 'S01E01.mkv' inside a folder like
-    'ShowName.S01.720p.WEB-DL/', returns 'ShowName.S01E01.mkv'.
-    Falls back to original filename for non-episode or already-named files.
-    """
-    filename = os.path.basename(file_path)
-    name, ext = os.path.splitext(filename)
 
-    # Only act when filename is purely an episode code e.g. S01E01
-    if not re.match(r'^S\d+E\d+', name, re.IGNORECASE):
-        return clean_filename(filename)
 
-    # Get immediate parent folder relative to extract root
-    rel    = os.path.relpath(file_path, base_dir).replace("\\", "/")
-    parts  = rel.split("/")
-    parent = parts[0] if len(parts) > 1 else ""
-    if not parent:
-        return clean_filename(filename)
+# ── Extract archive ───────────────────────────────────────────────────────────
+async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = None) -> bool:
+    try:
+        filename   = clean_filename(os.path.basename(file_path))
+        total_size = os.path.getsize(file_path)
+        start_time = time.time()
+        last_push  = [0.0]
 
-    # Extract show name = everything before first quality/season tag in parent
-    show_match = re.match(
-        r'^(.*?)(?:[._\s](?:S\d{2}|720p|1080p|480p|405p|WEB|AMZN|HDRip|BluRay|DD|AAC|H\.264|x264))',
-        parent, re.IGNORECASE
-    )
-    show_name = (show_match.group(1) if show_match
-                 else re.split(r'[._]S\d{2}', parent)[0]).strip("._- ")
+        if task:
+            task.current_phase = "ext"
+            task.ext.update({"filename": filename, "archive_size": total_size, "total": total_size})
 
-    if not show_name:
-        return clean_filename(filename)
+        async def _update(done, total, cur_file, fi, fn):
+            elapsed   = time.time() - start_time
+            speed     = done / elapsed if elapsed > 0 else 0
+            remaining = (total - done) / speed if speed > 0 else 0
+            pct       = min(done / total * 100, 100) if total > 0 else 0
+            if task:
+                # show parent/filename for context instead of bare basename
+                rel_parts = str(cur_file).replace("\\", "/").strip("/").split("/")
+                display   = "/".join(rel_parts[-2:]) if len(rel_parts) >= 2 else rel_parts[-1]
+                task.ext.update({
+                    "pct": pct, "speed": speed, "extracted": done, "total": total,
+                    "elapsed": elapsed, "remaining": remaining,
+                    "cur_file": display,
+                    "file_index": fi, "total_files": fn,
+                })
+                now = time.time()
+                if now - last_push[0] >= MIN_EDIT_GAP:
+                    last_push[0] = now
+                    await push_dashboard_update(task.user_id)
 
-    # Season from parent folder (S01), episode from filename (E01)
-    season_m  = re.search(r'(S\d{2})', parent, re.IGNORECASE)
-    episode_m = re.match(r'S\d+(E\d+)', name, re.IGNORECASE)
-    season    = season_m.group(1).upper()  if season_m  else ""
-    episode   = episode_m.group(1).upper() if episode_m else name.upper()
+        if file_path.endswith(".zip"):
+            loop = asyncio.get_event_loop()
+            def do_zip():
+                with zipfile.ZipFile(file_path, "r") as zf:
+                    ms = zf.infolist(); n = len(ms); ut = sum(m.file_size for m in ms); done = 0
+                    for i, m in enumerate(ms, 1):
+                        zf.extract(m, extract_to); done += m.file_size
+                        if i % 5 == 0 or i == n:
+                            asyncio.run_coroutine_threadsafe(_update(done, ut, m.filename, i, n), loop)
+                return True
+            return await loop.run_in_executor(executor, do_zip)
 
-    result = f"{show_name}.{season}{episode}{ext}" if season else f"{show_name}.{name}{ext}"
-    return clean_filename(result)
+        elif file_path.endswith(".7z"):
+            with py7zr.SevenZipFile(file_path, mode="r") as arc:
+                ms = arc.list(); n = len(ms)
+                tu = sum(getattr(m, "uncompressed", 0) or 0 for m in ms)
+                done = 0; tick = 0
+                class _CB(py7zr.callbacks.ExtractCallback):
+                    def __init__(s): s.fi = 0; s.cur_path = ""; s.loop = asyncio.get_event_loop()
+                    def report_start_preparation(s): pass
+                    def report_start(s, p, b): s.fi += 1; s.cur_path = str(p)
+                    def report_update(s, b): pass
+                    def report_end(s, p, wrote):
+                        nonlocal done, tick; done += wrote; tick += 1
+                        if tick % 5 == 0:
+                            asyncio.run_coroutine_threadsafe(
+                                _update(done, tu or total_size, s.cur_path, s.fi, n), s.loop)
+                    def report_postprocess(s): pass
+                    def report_warning(s, m): pass
+                try:
+                    arc.extractall(path=extract_to, callback=_CB())
+                    await _update(tu or total_size, tu or total_size, filename, n, n)
+                except TypeError:
+                    arc.extractall(path=extract_to)
+                    await _update(total_size, total_size, filename, 1, 1)
+            return True
+
+        elif file_path.endswith((".tar.gz", ".tgz", ".tar")):
+            import tarfile
+            loop = asyncio.get_event_loop()
+            def do_tar():
+                with tarfile.open(file_path, "r:*") as tf:
+                    ms = tf.getmembers(); n = len(ms); tu = sum(m.size for m in ms); done = 0
+                    for i, m in enumerate(ms, 1):
+                        tf.extract(m, extract_to); done += m.size
+                        if i % 5 == 0 or i == n:
+                            asyncio.run_coroutine_threadsafe(_update(done, tu, m.name, i, n), loop)
+                return True
+            return await loop.run_in_executor(executor, do_tar)
+
+        return False
+    except Exception as e:
+        print(f"Extraction error: {e}")
+        return False
 
 
 # ── Upload to Telegram ────────────────────────────────────────────────────────
@@ -599,17 +668,17 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             if not files:
                 await message.reply_text("❌ No uploadable files found."); return False
 
-            n            = len(files)
-            total_bytes  = sum(os.path.getsize(fp) for fp in files)
+            n              = len(files)
+            total_bytes    = sum(os.path.getsize(fp) for fp in files)
             uploaded_bytes = 0
-            dir_start    = time.time()
+            dir_start      = time.time()
 
             for idx, fp in enumerate(files, 1):
                 if task and task.cancelled:
                     return False
 
-                # ── Smart rename: ShowName.S01E01.mkv ──
-                smart = smart_episode_name(fp, file_path)
+                # Smart rename: ShowName.S01E01.mkv
+                smart  = smart_episode_name(fp, file_path)
                 new_fp = os.path.join(os.path.dirname(fp), smart)
                 if fp != new_fp and not os.path.exists(new_fp):
                     os.rename(fp, new_fp); fp = new_fp
@@ -634,11 +703,13 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
                 else:
                     await message.reply_document(document=fp, caption=cap, disable_notification=True)
 
+                # Delete each file immediately after upload
                 try: os.remove(fp)
                 except Exception as e: print(f"Cleanup error (file {idx}/{n}): {e}")
 
                 uploaded_bytes += file_sz
 
+            # Remove now-empty extracted directory
             try: shutil.rmtree(file_path, ignore_errors=True)
             except Exception as e: print(f"Cleanup error (dir): {e}")
 
@@ -647,7 +718,8 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
     except Exception as e:
         await message.reply_text(f"❌ Upload error: {str(e)}")
         return False
-        
+
+
 # ── Core task processor ───────────────────────────────────────────────────────
 async def process_task_execution(message: Message, task: DownloadTask, download, extract: bool):
     gid = download.gid; task.gid = gid
@@ -678,7 +750,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
             cleanup_files(task); active_downloads.pop(task.gid, None)
             await push_dashboard_update(task.user_id); return
 
-        # ── STOP CHECK after download loop, before extract/upload ──
+        # STOP CHECK after download loop, before extract/upload
         if task.cancelled:
             cleanup_files(task); active_downloads.pop(task.gid, None)
             await push_dashboard_update(task.user_id); return
@@ -690,7 +762,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         task.file_path = fp
 
         if extract and fp.endswith((".zip", ".7z", ".tar.gz", ".tgz", ".tar")):
-            # ── STOP CHECK before extract ──
+            # STOP CHECK before extract
             if task.cancelled:
                 cleanup_files(task); active_downloads.pop(task.gid, None)
                 await push_dashboard_update(task.user_id); return
@@ -700,7 +772,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         else:
             us, cap = fp, ""
 
-        # ── STOP CHECK before upload ──
+        # STOP CHECK before upload
         if task.cancelled:
             cleanup_files(task); active_downloads.pop(task.gid, None)
             await push_dashboard_update(task.user_id); return
@@ -713,6 +785,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
         cleanup_files(task); active_downloads.pop(task.gid, None)
         await push_dashboard_update(task.user_id)
+
 
 # ── Bot commands ──────────────────────────────────────────────────────────────
 @app.on_message(filters.command(["leech", "l", "ql"]))
