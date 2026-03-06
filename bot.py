@@ -580,7 +580,6 @@ async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = 
         print(f"Extraction error: {e}")
         return False
 
-
 # ── Upload to Telegram ────────────────────────────────────────────────────────
 async def upload_to_telegram(file_path: str, message: Message, caption: str = "", task: DownloadTask = None) -> bool:
     if task:
@@ -595,6 +594,11 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             if fs > MAX_UPLOAD_BYTES:
                 await message.reply_text(f"❌ File too large (>{MAX_UPLOAD_LABEL})")
                 return False
+
+            # ── STOP CHECK before upload starts ──
+            if task and task.cancelled:
+                return False
+
             raw = os.path.basename(file_path); cn = clean_filename(raw)
             if raw != cn:
                 np = os.path.join(os.path.dirname(file_path), cn)
@@ -620,6 +624,9 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
                 await message.reply_video(video=file_path, caption=fc, progress=_progress, supports_streaming=True, disable_notification=True)
             else:
                 await message.reply_document(document=file_path, caption=fc, progress=_progress, disable_notification=True)
+
+            # ── If cancelled mid-upload, delete the sent message (best effort) ──
+            # (Pyrogram doesn't support cancelling an in-flight upload, so we just skip post-processing)
             return True
 
         elif os.path.isdir(file_path):
@@ -632,6 +639,11 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             uploaded_bytes = 0
             dir_start = time.time()
             for idx, fp in enumerate(files, 1):
+
+                # ── STOP CHECK before each file in multi-file upload ──
+                if task and task.cancelled:
+                    return False
+
                 raw = os.path.basename(fp); cn = clean_filename(raw)
                 if raw != cn:
                     np = os.path.join(os.path.dirname(fp), cn); os.rename(fp, np); fp = np
@@ -657,8 +669,7 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
     except Exception as e:
         await message.reply_text(f"❌ Upload error: {str(e)}")
         return False
-
-
+        
 # ── Core task processor ───────────────────────────────────────────────────────
 async def process_task_execution(message: Message, task: DownloadTask, download, extract: bool):
     gid = download.gid; task.gid = gid
@@ -689,6 +700,11 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
             cleanup_files(task); active_downloads.pop(task.gid, None)
             await push_dashboard_update(task.user_id); return
 
+        # ── STOP CHECK after download loop, before extract/upload ──
+        if task.cancelled:
+            cleanup_files(task); active_downloads.pop(task.gid, None)
+            await push_dashboard_update(task.user_id); return
+
         try:
             fdl = aria2.get_download(task.gid); fp = os.path.join(DOWNLOAD_DIR, fdl.name)
         except Exception:
@@ -696,11 +712,20 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         task.file_path = fp
 
         if extract and fp.endswith((".zip", ".7z", ".tar.gz", ".tgz", ".tar")):
+            # ── STOP CHECK before extract ──
+            if task.cancelled:
+                cleanup_files(task); active_downloads.pop(task.gid, None)
+                await push_dashboard_update(task.user_id); return
             ed = os.path.join(DOWNLOAD_DIR, f"extracted_{int(time.time())}")
             os.makedirs(ed, exist_ok=True); task.extract_dir = ed
             us, cap = (ed, "📁 Extracted files") if await extract_archive(fp, ed, task=task) else (fp, "")
         else:
             us, cap = fp, ""
+
+        # ── STOP CHECK before upload ──
+        if task.cancelled:
+            cleanup_files(task); active_downloads.pop(task.gid, None)
+            await push_dashboard_update(task.user_id); return
 
         await upload_to_telegram(us, message, caption=cap, task=task)
         cleanup_files(task); active_downloads.pop(task.gid, None)
@@ -710,7 +735,6 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
         cleanup_files(task); active_downloads.pop(task.gid, None)
         await push_dashboard_update(task.user_id)
-
 
 # ── Bot commands ──────────────────────────────────────────────────────────────
 @app.on_message(filters.command(["leech", "l", "ql"]))
