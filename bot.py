@@ -66,8 +66,15 @@ def clean_filename(filename: str) -> str:
     c = re.sub(r'^\[.*?\]\s*|^\(.*?\)\s*', '', c)
     c = re.sub(r'^@\w+\s*', '', c)
     c = re.sub(r'https?://\S+', '', c)
-    c = re.sub(r'^(?:https?://)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:[._\-\s]+)', '', c, flags=re.IGNORECASE)
-    c = re.sub(r'(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|info|xyz|site|club)', '', c, flags=re.IGNORECASE)
+    # Strip www. prefixed domains or known junk TLDs only at start of filename
+    c = re.sub(r'^(?:www\.)[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:[._\-\s]+)', '', c, flags=re.IGNORECASE)
+    c = re.sub(r'^[a-zA-Z0-9-]+\.(?:gs|pw|me|to|io|cc|tv|ws)(?:[._\-\s]+)', '', c, flags=re.IGNORECASE)
+    # Remove inline junk site tags like -ExtraFlix.Pw (must start with a letter, not digit)
+    c = re.sub(r'[._\-][a-zA-Z][a-zA-Z0-9-]*\.(?:pw|gs|me|to|cc|ws|tv)\b', '', c, flags=re.IGNORECASE)
+    # Remove standalone known domains
+    c = re.sub(r'\b[a-zA-Z0-9-]+\.(?:com|net|org|info|xyz|site|club)\b', '', c, flags=re.IGNORECASE)
+    # Clean up double dots left behind
+    c = re.sub(r'\.{2,}', '.', c)
     c = c.strip(" .-_")
     if not c:
         c = filename
@@ -111,7 +118,7 @@ def smart_episode_name(file_path: str, base_dir: str) -> str:
     episode   = episode_m.group(1).upper() if episode_m else name.upper()
 
     result = f"{show_name}.{season}{episode}{ext}" if season else f"{show_name}.{name}{ext}"
-    return clean_filename(result)
+    return result
 
 def create_progress_bar(pct: float) -> str:
     if pct >= 100: return "[" + chr(11042)*12 + "] 100%"
