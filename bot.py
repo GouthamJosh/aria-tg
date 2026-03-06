@@ -499,90 +499,47 @@ async def poll_download_progress(task: DownloadTask):
         except Exception:
             pass
         await asyncio.sleep(3)
+# ── Smart episode name: combines show name from parent folder + episode code ──
+def smart_episode_name(file_path: str, base_dir: str) -> str:
+    """
+    If a file is named just 'S01E01.mkv' inside a folder like
+    'ShowName.S01.720p.WEB-DL/', returns 'ShowName.S01E01.mkv'.
+    Falls back to original filename for non-episode or already-named files.
+    """
+    filename = os.path.basename(file_path)
+    name, ext = os.path.splitext(filename)
 
+    # Only act when filename is purely an episode code e.g. S01E01
+    if not re.match(r'^S\d+E\d+', name, re.IGNORECASE):
+        return clean_filename(filename)
 
-# ── Extract archive ───────────────────────────────────────────────────────────
-async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = None) -> bool:
-    try:
-        filename   = clean_filename(os.path.basename(file_path))
-        total_size = os.path.getsize(file_path)
-        start_time = time.time()
-        last_push  = [0.0]
+    # Get immediate parent folder relative to extract root
+    rel    = os.path.relpath(file_path, base_dir).replace("\\", "/")
+    parts  = rel.split("/")
+    parent = parts[0] if len(parts) > 1 else ""
+    if not parent:
+        return clean_filename(filename)
 
-        if task:
-            task.current_phase = "ext"
-            task.ext.update({"filename": filename, "archive_size": total_size, "total": total_size})
+    # Extract show name = everything before first quality/season tag in parent
+    show_match = re.match(
+        r'^(.*?)(?:[._\s](?:S\d{2}|720p|1080p|480p|405p|WEB|AMZN|HDRip|BluRay|DD|AAC|H\.264|x264))',
+        parent, re.IGNORECASE
+    )
+    show_name = (show_match.group(1) if show_match
+                 else re.split(r'[._]S\d{2}', parent)[0]).strip("._- ")
 
-        async def _update(done, total, cur_file, fi, fn):
-            elapsed   = time.time() - start_time
-            speed     = done / elapsed if elapsed > 0 else 0
-            remaining = (total - done) / speed if speed > 0 else 0
-            pct       = min(done / total * 100, 100) if total > 0 else 0
-            if task:
-                task.ext.update({
-                    "pct": pct, "speed": speed, "extracted": done, "total": total,
-                    "elapsed": elapsed, "remaining": remaining,
-                    "cur_file": clean_filename(os.path.basename(cur_file)),
-                    "file_index": fi, "total_files": fn,
-                })
-                now = time.time()
-                if now - last_push[0] >= MIN_EDIT_GAP:
-                    last_push[0] = now
-                    await push_dashboard_update(task.user_id)
+    if not show_name:
+        return clean_filename(filename)
 
-        if file_path.endswith(".zip"):
-            loop = asyncio.get_event_loop()
-            def do_zip():
-                with zipfile.ZipFile(file_path, "r") as zf:
-                    ms = zf.infolist(); n = len(ms); ut = sum(m.file_size for m in ms); done = 0
-                    for i, m in enumerate(ms, 1):
-                        zf.extract(m, extract_to); done += m.file_size
-                        if i % 5 == 0 or i == n:
-                            asyncio.run_coroutine_threadsafe(_update(done, ut, m.filename, i, n), loop)
-                return True
-            return await loop.run_in_executor(executor, do_zip)
+    # Season from parent folder (S01), episode from filename (E01)
+    season_m  = re.search(r'(S\d{2})', parent, re.IGNORECASE)
+    episode_m = re.match(r'S\d+(E\d+)', name, re.IGNORECASE)
+    season    = season_m.group(1).upper()  if season_m  else ""
+    episode   = episode_m.group(1).upper() if episode_m else name.upper()
 
-        elif file_path.endswith(".7z"):
-            with py7zr.SevenZipFile(file_path, mode="r") as arc:
-                ms = arc.list(); n = len(ms)
-                tu = sum(getattr(m, "uncompressed", 0) or 0 for m in ms)
-                done = 0; tick = 0
-                class _CB(py7zr.callbacks.ExtractCallback):
-                    def __init__(s): s.fi = 0; s.loop = asyncio.get_event_loop()
-                    def report_start_preparation(s): pass
-                    def report_start(s, p, b): s.fi += 1
-                    def report_update(s, b): pass
-                    def report_end(s, p, wrote):
-                        nonlocal done, tick; done += wrote; tick += 1
-                        if tick % 5 == 0:
-                            asyncio.run_coroutine_threadsafe(_update(done, tu or total_size, filename, s.fi, n), s.loop)
-                    def report_postprocess(s): pass
-                    def report_warning(s, m): pass
-                try:
-                    arc.extractall(path=extract_to, callback=_CB())
-                    await _update(tu or total_size, tu or total_size, filename, n, n)
-                except TypeError:
-                    arc.extractall(path=extract_to)
-                    await _update(total_size, total_size, filename, 1, 1)
-            return True
+    result = f"{show_name}.{season}{episode}{ext}" if season else f"{show_name}.{name}{ext}"
+    return clean_filename(result)
 
-        elif file_path.endswith((".tar.gz", ".tgz", ".tar")):
-            import tarfile
-            loop = asyncio.get_event_loop()
-            def do_tar():
-                with tarfile.open(file_path, "r:*") as tf:
-                    ms = tf.getmembers(); n = len(ms); tu = sum(m.size for m in ms); done = 0
-                    for i, m in enumerate(ms, 1):
-                        tf.extract(m, extract_to); done += m.size
-                        if i % 5 == 0 or i == n:
-                            asyncio.run_coroutine_threadsafe(_update(done, tu, m.name, i, n), loop)
-                return True
-            return await loop.run_in_executor(executor, do_tar)
-
-        return False
-    except Exception as e:
-        print(f"Extraction error: {e}")
-        return False
 
 # ── Upload to Telegram ────────────────────────────────────────────────────────
 async def upload_to_telegram(file_path: str, message: Message, caption: str = "", task: DownloadTask = None) -> bool:
@@ -602,7 +559,8 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             if task and task.cancelled:
                 return False
 
-            raw = os.path.basename(file_path); cn = clean_filename(raw)
+            raw = os.path.basename(file_path)
+            cn  = clean_filename(raw)
             if raw != cn:
                 np = os.path.join(os.path.dirname(file_path), cn)
                 os.rename(file_path, np); file_path = np
@@ -628,32 +586,38 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             else:
                 await message.reply_document(document=file_path, caption=fc, progress=_progress, disable_notification=True)
 
-            # ── Delete file immediately after upload ──
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                print(f"Immediate cleanup error (single file): {e}")
+            try: os.remove(file_path)
+            except Exception as e: print(f"Cleanup error (single): {e}")
 
             return True
 
         elif os.path.isdir(file_path):
-            files = [os.path.join(r, f) for r, _, fs2 in os.walk(file_path) for f in fs2
-                     if os.path.getsize(os.path.join(r, f)) <= MAX_UPLOAD_BYTES]
+            files = sorted([
+                os.path.join(r, f) for r, _, fs2 in os.walk(file_path) for f in fs2
+                if os.path.getsize(os.path.join(r, f)) <= MAX_UPLOAD_BYTES
+            ])
             if not files:
                 await message.reply_text("❌ No uploadable files found."); return False
-            n = len(files)
-            total_bytes = sum(os.path.getsize(fp) for fp in files)
-            uploaded_bytes = 0
-            dir_start = time.time()
-            for idx, fp in enumerate(files, 1):
 
+            n            = len(files)
+            total_bytes  = sum(os.path.getsize(fp) for fp in files)
+            uploaded_bytes = 0
+            dir_start    = time.time()
+
+            for idx, fp in enumerate(files, 1):
                 if task and task.cancelled:
                     return False
 
-                raw = os.path.basename(fp); cn = clean_filename(raw)
-                if raw != cn:
-                    np = os.path.join(os.path.dirname(fp), cn); os.rename(fp, np); fp = np
+                # ── Smart rename: ShowName.S01E01.mkv ──
+                smart = smart_episode_name(fp, file_path)
+                new_fp = os.path.join(os.path.dirname(fp), smart)
+                if fp != new_fp and not os.path.exists(new_fp):
+                    os.rename(fp, new_fp); fp = new_fp
+
                 file_sz = os.path.getsize(fp)
+                cn      = os.path.basename(fp)
+                cap     = f"📄 {cn} [{idx}/{n}]"
+
                 if task:
                     elapsed = time.time() - dir_start
                     spd = uploaded_bytes / elapsed if elapsed > 0 else 0
@@ -664,31 +628,26 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
                         "file_index": idx, "total_files": n,
                     })
                     await push_dashboard_update(user_id)
-                cap = f"📄 {cn} [{idx}/{n}]"
+
                 if as_video and fp.lower().endswith(video_exts):
                     await message.reply_video(video=fp, caption=cap, disable_notification=True)
                 else:
                     await message.reply_document(document=fp, caption=cap, disable_notification=True)
 
-                # ── Delete each file immediately after it's sent ──
-                try:
-                    os.remove(fp)
-                except Exception as e:
-                    print(f"Immediate cleanup error (file {idx}/{n}): {e}")
+                try: os.remove(fp)
+                except Exception as e: print(f"Cleanup error (file {idx}/{n}): {e}")
 
                 uploaded_bytes += file_sz
 
-            # ── Remove now-empty extracted directory ──
-            try:
-                shutil.rmtree(file_path, ignore_errors=True)
-            except Exception as e:
-                print(f"Immediate cleanup error (dir): {e}")
+            try: shutil.rmtree(file_path, ignore_errors=True)
+            except Exception as e: print(f"Cleanup error (dir): {e}")
 
             return True
 
     except Exception as e:
         await message.reply_text(f"❌ Upload error: {str(e)}")
-        return False        
+        return False
+        
 # ── Core task processor ───────────────────────────────────────────────────────
 async def process_task_execution(message: Message, task: DownloadTask, download, extract: bool):
     gid = download.gid; task.gid = gid
