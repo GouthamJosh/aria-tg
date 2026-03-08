@@ -11,7 +11,6 @@ WORKDIR /app
 RUN apt-get update -qq && \
     apt-get install -y -qq \
         aria2 \
-        ffmpeg \
         curl \
         wget \
         ca-certificates \
