@@ -809,6 +809,8 @@ async def download_ytdl(url: str, task: DownloadTask, format_id: str) -> str:
             asyncio.run_coroutine_threadsafe(push_dashboard_update(task.user_id), loop)
 
     cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+    
+    # --- ANTI-BAN OPTIONS ADDED HERE ---
     ydl_opts = {
         "format":             format_id,
         "outtmpl":            os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
@@ -816,6 +818,8 @@ async def download_ytdl(url: str, task: DownloadTask, format_id: str) -> str:
         "nocheckcertificate": True,
         "noplaylist":         True,
         "progress_hooks":     [ytdl_progress],
+        "source_address":     "0.0.0.0", # Bypass some IP blocks
+        "extractor_args":     {"youtube": ["player_client=android,web"]}, # Fixes Data Sync ID Error
     }
     
     if os.path.exists(cookie_path):
@@ -861,7 +865,14 @@ async def ytdl_selector(client, m: Message):
         loop = asyncio.get_event_loop()
         def _run():
             cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-            ydl_opts = {"quiet": True, "nocheckcertificate": True}
+            
+            # --- ANTI-BAN OPTIONS ADDED HERE ---
+            ydl_opts = {
+                "quiet": True, 
+                "nocheckcertificate": True,
+                "source_address": "0.0.0.0", # Bypass some IP blocks
+                "extractor_args": {"youtube": ["player_client=android,web"]} # Fixes Data Sync ID Error
+            }
             if os.path.exists(cookie_path):
                 ydl_opts["cookiefile"] = cookie_path
 
