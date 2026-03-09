@@ -8,3 +8,5 @@ uvloop
 yt-dlp
 curl-cffi
 ffmpeg
+aiofiles
+nodejs
