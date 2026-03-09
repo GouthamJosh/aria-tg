@@ -40,7 +40,7 @@ ENGINE_EXTRACT = "py7zr / zipfile"
 # ─────────────────────────────────────────────────────────────────────────────
 #  Dashboard / FloodWait Settings
 # ─────────────────────────────────────────────────────────────────────────────
-DASHBOARD_REFRESH_INTERVAL = int(os.environ.get("DASHBOARD_REFRESH_INTERVAL", "10"))
+DASHBOARD_REFRESH_INTERVAL = int(os.environ.get("DASHBOARD_REFRESH_INTERVAL", "6"))
 MIN_EDIT_GAP               = int(os.environ.get("MIN_EDIT_GAP", "5"))
 
 # ─────────────────────────────────────────────────────────────────────────────
