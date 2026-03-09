@@ -9,6 +9,10 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OWNER_ID  = int(os.environ.get("OWNER_ID", "6108995220"))
 
+# ── Database ──────────────────────────────────────────────────────────────────
+# MongoDB connection string for storing user dump channels
+MONGO_URL = os.environ.get("MONGO_URL", "")
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Aria2 RPC
 # ─────────────────────────────────────────────────────────────────────────────
