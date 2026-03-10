@@ -504,8 +504,10 @@ def _base_ydl_opts(cookie_path: str | None) -> dict:
         "noplaylist":         True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "mweb", "web"],
-                "skip_webpage":  True,   # avoid n-challenge entirely on ios path
+                # ios bypasses n-challenge natively, android gives full format list,
+                # tv_embedded works reliably on server IPs without cookies.
+                # skip_webpage removed — it breaks format discovery.
+                "player_client": ["ios", "android", "tv_embedded"],
             }
         },
     }
@@ -715,9 +717,9 @@ async def ytleech_quality_callback(client, cq: CallbackQuery):
             )
         else:
             # Adaptive: separate video+audio tracks merged by ffmpeg → mp4
+            # Flexible fallback — does not require m4a/mp4 specifically
             f_id = (
-                f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
-                f"/bestvideo[height<={height}]+bestaudio"
+                f"bestvideo[height<={height}]+bestaudio"
                 f"/best[height<={height}]"
                 f"/best"
             )
