@@ -483,6 +483,7 @@ async def dashboard_page_callback(client, cq: CallbackQuery):
     except Exception as e:
         await safe_answer(cq, f"❌ {e}", show_alert=True)
 
+
 async def download_ytdl(url: str, task: DownloadTask, format_id: str) -> str:
     loop = asyncio.get_event_loop()
     last_push = [0.0]
@@ -513,15 +514,17 @@ async def download_ytdl(url: str, task: DownloadTask, format_id: str) -> str:
             last_push[0] = now
             asyncio.run_coroutine_threadsafe(push_dashboard_update(task.user_id), loop)
 
+    local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+    
     ydl_opts = {
         "format":             format_id,
         "outtmpl":            os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
         "quiet":              True,
         "nocheckcertificate": True,
-        "cookiefile": os.path.join(os.path.dirname(os.path.abspath(file)), "cookies.txt") if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(file)), "cookies.txt")) else None,
+        "cookiefile":         local_cookie_path if os.path.exists(local_cookie_path) else None,
         "noplaylist":         True,
         "progress_hooks":     [ytdl_progress],
-        "merge_output_format": "mkv", # Ensures smooth merging of Best Video + Best Audio
+        "merge_output_format": "mkv",
     }
 
     def _run():
@@ -591,9 +594,17 @@ async def ytdl_selector(client, m: Message):
     msg = await m.reply_text("🔍 Fetching Formats...")
     try:
         loop = asyncio.get_event_loop()
+        local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+        
         def _run():
-            with yt_dlp.YoutubeDL({"quiet": True, "nocheckcertificate": True}) as ydl:
+            ydl_opts = {
+                "quiet": True, 
+                "nocheckcertificate": True,
+                "cookiefile": local_cookie_path if os.path.exists(local_cookie_path) else None
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(url, download=False)
+        
         info = await loop.run_in_executor(executor, _run)
         formats = info.get("formats", [])
         buttons = []
@@ -1042,20 +1053,55 @@ async def universal_leech_command(client, message: Message):
 
 
 @app.on_message(filters.document)
-async def handle_torrent_document(client, message: Message):
-    if not message.document.file_name.endswith(".torrent"): return
-    try:
-        user_id = message.from_user.id; user_label = get_user_label(message)
-        extract = "-e" in (message.caption or "").lower()
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-        await get_or_create_dashboard(user_id, message, user_label)
-        tp = os.path.join(DOWNLOAD_DIR, f"{message.id}_{message.document.file_name}")
-        await message.download(file_name=tp)
-        dl = aria2.add_torrent(tp, options=BT_OPTIONS)
-        task = DownloadTask(dl.gid, user_id, extract)
-        asyncio.create_task(process_task_execution(message, task, dl, extract))
-    except Exception as e:
-        await message.reply_text(f"❌ **Error processing torrent:** `{str(e)}`")
+async def handle_document_upload(client, message: Message):
+    file_name = message.document.file_name or ""
+    
+    # 1. Handle Admin Cookies Upload
+    if file_name == "cookies.txt":
+        if message.from_user.id != OWNER_ID:
+            return await message.reply_text("❌ **Access Denied:** Only the bot owner can upload cookies.")
+            
+        msg = await message.reply_text("⏳ Processing `cookies.txt`...")
+        file_path = await message.download()
+        
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                cookie_data = f.read()
+
+            # Save to MongoDB
+            await settings_col.update_one(
+                {"_id": "ytdl_cookies"},
+                {"$set": {"content": cookie_data}},
+                upsert=True
+            )
+
+            # Sync locally for immediate yt-dlp use
+            local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+            with open(local_cookie_path, "w", encoding="utf-8") as f:
+                f.write(cookie_data)
+
+            await msg.edit_text("✅ **`cookies.txt` successfully saved to Database and synced to Local!**")
+        except Exception as e:
+            await msg.edit_text(f"❌ **Error saving cookies:** `{str(e)}`")
+        finally:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        return
+
+    # 2. Handle standard torrent upload
+    if file_name.endswith(".torrent"):
+        try:
+            user_id = message.from_user.id; user_label = get_user_label(message)
+            extract = "-e" in (message.caption or "").lower()
+            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+            await get_or_create_dashboard(user_id, message, user_label)
+            tp = os.path.join(DOWNLOAD_DIR, f"{message.id}_{file_name}")
+            await message.download(file_name=tp)
+            dl = aria2.add_torrent(tp, options=BT_OPTIONS)
+            task = DownloadTask(dl.gid, user_id, extract)
+            asyncio.create_task(process_task_execution(message, task, dl, extract))
+        except Exception as e:
+            await message.reply_text(f"❌ **Error processing torrent:** `{str(e)}`")
 
 
 @app.on_message(filters.command(["stop"]) | filters.regex(r"^/stop_\w+"))
@@ -1108,7 +1154,7 @@ async def help_command(client, message: Message):
         "• `/leech <link> -e` — Download & auto-extract archive\n"
         "• **Upload a `.torrent` file** directly to start\n\n"
         "**⚙️ Control:**\n"
-        "• `/settings` — Toggle Document / Video upload mode\n"
+        "• `/settings` — Toggle Document / Video upload mode & Manage Cookies\n"
         "• `/stop <task_id>` — Cancel an active task\n"
         "• `/setdump <channel_id> -on/-off` — Manage global dump channel (Owner Only)\n\n"
         "**✨ Features:**\n"
@@ -1130,8 +1176,29 @@ async def settings_command(client, message: Message):
     uid = message.from_user.id
     av  = user_settings.get(uid, {}).get("as_video", False)
     mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
-    kb  = InlineKeyboardMarkup([[InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]])
-    await message.reply_text("⚙️ **Upload Settings**\n\nChoose how video files (.mp4, .mkv, .webm) are sent.", reply_markup=kb)
+    
+    kb_buttons = [
+        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]
+    ]
+
+    # Admin Settings
+    if uid == OWNER_ID:
+        cookie_doc = await settings_col.find_one({"_id": "ytdl_cookies"})
+        has_cookies = bool(cookie_doc and cookie_doc.get("content"))
+        
+        if has_cookies:
+            kb_buttons.append([InlineKeyboardButton("🗑 Delete Cookies.txt", callback_data="delete_cookies")])
+        else:
+            kb_buttons.append([InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")])
+
+    kb_buttons.append([InlineKeyboardButton("🗑 Close", callback_data="close_help")])
+    kb = InlineKeyboardMarkup(kb_buttons)
+    
+    await message.reply_text(
+        "⚙️ **Upload Settings**\n\nChoose how video files (.mp4, .mkv, .webm) are sent.\n"
+        "*(Admins can also manage YT-DLP cookies here)*", 
+        reply_markup=kb
+    )
 
 
 @app.on_callback_query(filters.regex(r"^toggle_mode:"))
@@ -1139,15 +1206,55 @@ async def toggle_mode_callback(client, cq: CallbackQuery):
     _, uid_str = cq.data.split(":"); uid = int(uid_str)
     if cq.from_user.id != uid:
         await safe_answer(cq, "❌ These aren't your settings!", show_alert=True); return
+        
     cur = user_settings.get(uid, {}).get("as_video", False)
     user_settings.setdefault(uid, {})["as_video"] = not cur
     mt = "🎬 Video (Playable)" if not cur else "📄 Document (File)"
+    
+    kb_buttons = [
+        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]
+    ]
+    
+    if uid == OWNER_ID:
+        cookie_doc = await settings_col.find_one({"_id": "ytdl_cookies"})
+        if cookie_doc and cookie_doc.get("content"):
+            kb_buttons.append([InlineKeyboardButton("🗑 Delete Cookies.txt", callback_data="delete_cookies")])
+        else:
+            kb_buttons.append([InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")])
+
+    kb_buttons.append([InlineKeyboardButton("🗑 Close", callback_data="close_help")])
+    
+    await cq.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_buttons))
+    await safe_answer(cq, f"✅ Switched to {mt}!")
+
+
+@app.on_callback_query(filters.regex(r"^delete_cookies$"))
+async def delete_cookies_callback(client, cq: CallbackQuery):
+    if cq.from_user.id != OWNER_ID:
+        return await safe_answer(cq, "❌ Access Denied!", show_alert=True)
+
+    # Remove from MongoDB
+    await settings_col.delete_one({"_id": "ytdl_cookies"})
+
+    # Remove locally
+    local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+    if os.path.exists(local_cookie_path):
+        try: os.remove(local_cookie_path)
+        except: pass
+
+    await safe_answer(cq, "✅ Cookies deleted successfully!", show_alert=True)
+
+    # Refresh the UI Keyboard
+    av  = user_settings.get(OWNER_ID, {}).get("as_video", False)
+    mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
+    
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")],
+        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{OWNER_ID}")],
+        [InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")],
         [InlineKeyboardButton("🗑 Close", callback_data="close_help")]
     ])
+    
     await cq.edit_message_reply_markup(reply_markup=kb)
-    await safe_answer(cq, f"✅ Switched to {mt}!")
 
 
 # ── Keep-alive web server ─────────────────────────────────────────────────────
@@ -1178,6 +1285,18 @@ async def main():
     print(f"📄 Tasks per page  : {TASKS_PER_PAGE}")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     
+    # Sync DB cookies to local file for yt-dlp at startup
+    local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+    cookie_doc = await settings_col.find_one({"_id": "ytdl_cookies"})
+    if cookie_doc and cookie_doc.get("content"):
+        with open(local_cookie_path, "w", encoding="utf-8") as f:
+            f.write(cookie_doc["content"])
+        print("✅ Cookies synced from Database.")
+    else:
+        if os.path.exists(local_cookie_path):
+            os.remove(local_cookie_path)
+            print("🗑 Cleared stale local cookies.")
+
     await app.start()
     
     # Send restart message to OWNER PM
