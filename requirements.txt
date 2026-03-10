@@ -12,3 +12,4 @@ yt_dlp
 ffmpeg
 nodejs
 deno
+python-dotenv
