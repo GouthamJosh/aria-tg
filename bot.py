@@ -487,8 +487,32 @@ async def dashboard_page_callback(client, cq: CallbackQuery):
         await safe_answer(cq, f"❌ {e}", show_alert=True)
 
 
-async def download_ytdl(url: str, task: DownloadTask, format_id: str) -> str:
-    loop = asyncio.get_event_loop()
+# ══════════════════════════════════════════════════════════════════════
+#  YT-DLP — Unified Download (Video + proper MP3 via FFmpeg)
+# ══════════════════════════════════════════════════════════════════════
+
+def _get_local_cookie_path() -> str | None:
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+    return p if os.path.exists(p) else None
+
+# Base ydl_opts shared between info-fetch and download
+def _base_ydl_opts(cookie_path: str | None) -> dict:
+    return {
+        "quiet":              True,
+        "nocheckcertificate": True,
+        "cookiefile":         cookie_path,
+        "noplaylist":         True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "mweb", "web"],
+                "skip_webpage":  True,   # avoid n-challenge entirely on ios path
+            }
+        },
+    }
+
+
+async def download_ytdl(url: str, task: DownloadTask, format_id: str, is_audio: bool = False) -> str:
+    loop = asyncio.get_running_loop()
     last_push = [0.0]
 
     def ytdl_progress(d):
@@ -508,7 +532,7 @@ async def download_ytdl(url: str, task: DownloadTask, format_id: str) -> str:
             "total":      total,
             "elapsed":    elapsed,
             "eta":        eta_s,
-            "peer_line":  "├ Engine → YT-DLP\n",
+            "peer_line":  "├ **Engine** → YT-DLP\n",
         })
         task.filename  = clean_filename(filename)
         task.file_size = total
@@ -517,23 +541,26 @@ async def download_ytdl(url: str, task: DownloadTask, format_id: str) -> str:
             last_push[0] = now
             asyncio.run_coroutine_threadsafe(push_dashboard_update(task.user_id), loop)
 
-    local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-    
+    cookie_path = _get_local_cookie_path()
     ydl_opts = {
-    "format":              format_id,
-    "outtmpl":             os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
-    "quiet":               True,
-    "nocheckcertificate":  True,
-    "cookiefile":          local_cookie_path if os.path.exists(local_cookie_path) else None,
-    "noplaylist":          True,
-    "progress_hooks":      [ytdl_progress],
-    "merge_output_format": "mkv",
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["ios", "mweb", "web"],
-        }
-    },
-}
+        **_base_ydl_opts(cookie_path),
+        "format":              format_id,
+        "outtmpl":             os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
+        "progress_hooks":      [ytdl_progress],
+        "merge_output_format": "mp4",   # mp4 container for video (widely supported)
+    }
+
+    # ── MP3: use FFmpegExtractAudio postprocessor for a proper conversion ──
+    if is_audio:
+        ydl_opts["format"]          = "bestaudio/best"
+        ydl_opts["outtmpl"]         = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
+        ydl_opts["postprocessors"]  = [{
+            "key":              "FFmpegExtractAudio",
+            "preferredcodec":   "mp3",
+            "preferredquality": "320",   # 320 kbps
+        }]
+        # Remove merge_output_format — irrelevant for audio-only
+        ydl_opts.pop("merge_output_format", None)
 
     def _run():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -541,20 +568,22 @@ async def download_ytdl(url: str, task: DownloadTask, format_id: str) -> str:
             return str(ydl.prepare_filename(info))
 
     raw_path = await loop.run_in_executor(executor, _run)
-    
-    # Extension fallback logic in case ffmpeg changes the final container format
+
+    # ── Extension fallback: ffmpeg may rename the output file ──
     base, _ = os.path.splitext(raw_path)
-    for ext in (".mkv", ".mp4", ".webm", ".m4a", ".mp3", ".opus", ""):
+    search_exts = (".mp3",) if is_audio else (".mp4", ".mkv", ".webm", ".m4a", "")
+    for ext in search_exts:
         candidate = base + ext
         if os.path.exists(candidate):
             return candidate
     return raw_path
 
 
-async def process_ytdl_task(message: Message, task: DownloadTask, url: str, format_id: str):
+async def process_ytdl_task(message: Message, task: DownloadTask, url: str,
+                             format_id: str, is_audio: bool = False):
     try:
         await push_dashboard_update(task.user_id)
-        file_path = await download_ytdl(url, task, format_id)
+        file_path = await download_ytdl(url, task, format_id, is_audio=is_audio)
         if task.cancelled:
             cleanup_files(task); active_downloads.pop(task.gid, None)
             await push_dashboard_update(task.user_id); return
@@ -563,104 +592,153 @@ async def process_ytdl_task(message: Message, task: DownloadTask, url: str, form
         cleanup_files(task); active_downloads.pop(task.gid, None)
         await push_dashboard_update(task.user_id)
     except Exception as e:
-        await message.reply_text(f"❌ YT-DLP Error: {str(e)}")
+        await message.reply_text(f"❌ **YT-DLP Error:** `{str(e)}`")
         cleanup_files(task); active_downloads.pop(task.gid, None)
         await push_dashboard_update(task.user_id)
 
 
-# 👉 NEW DIRECT LEECH COMMAND (Bypasses Menu, Downloads Best Quality)
-@app.on_message(filters.command(["ytdlleech"]))
-async def ytdl_direct_leech(client, m: Message):
-    if len(m.command) < 2: return await m.reply_text("❌ Send Link!\nUsage: /ytdlleech <URL>")
-    url = m.text.split(None, 1)[1]
-    msg = await m.reply_text("⏳ Starting YT-DLP Direct Leech (Best Quality)...")
-    
-    user_id    = m.from_user.id
-    user_label = get_user_label(m)
-    
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    await get_or_create_dashboard(user_id, m, user_label)
-    
-    pseudo_gid = f"ytdl_{m.id}_{int(time.time())}"
-    task = DownloadTask(pseudo_gid, user_id)
-    task.dl["peer_line"] = "├ Engine → YT-DLP\n"
-    active_downloads[pseudo_gid] = task
-    
-    # Force highest quality video + audio combined
-    f_id = "bestvideo+bestaudio/best"
-    
-    asyncio.create_task(process_ytdl_task(m, task, url, f_id))
-    try: await msg.delete() # Clean up the initial status message
-    except: pass
+# ── /yl  /ytleech — Unified command with quality picker ──────────────────────
+@app.on_message(filters.command(["yl", "ytleech"]))
+async def ytleech_command(client, m: Message):
+    if len(m.command) < 2:
+        return await m.reply_text(
+            "❌ **Usage:** `/yl <URL>`\n"
+            "Example: `/yl https://youtu.be/xxxxx`"
+        )
 
+    url = m.text.split(None, 1)[1].strip()
+    msg = await m.reply_text("🔍 **Fetching available formats...**")
 
-# 👉 INTERACTIVE SELECTOR (Keep this if you want format selection sometimes)
-@app.on_message(filters.command(["ytdl", "yt"]))
-async def ytdl_selector(client, m: Message):
-    if len(m.command) < 2: return await m.reply_text("❌ Send Link!")
-    url = m.text.split(None, 1)[1]
-    msg = await m.reply_text("🔍 Fetching Formats...")
     try:
-        loop = asyncio.get_event_loop()
-        local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-        
-        def _run():
-            ydl_opts = {
-                "quiet": True, 
-                "nocheckcertificate": True,
-                "cookiefile": local_cookie_path if os.path.exists(local_cookie_path) else None
+        loop        = asyncio.get_running_loop()
+        cookie_path = _get_local_cookie_path()
+
+        def _fetch_info():
+            opts = {
+                **_base_ydl_opts(cookie_path),
+                "skip_download": True,
             }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=False)
-        
-        info = await loop.run_in_executor(executor, _run)
+
+        info    = await loop.run_in_executor(executor, _fetch_info)
         formats = info.get("formats", [])
-        buttons = []
-        seen = set()
-        for f in formats:
+        title   = info.get("title", "Video")[:50]
+
+        # ── Collect available resolutions ──────────────────────────────────
+        # Prefer progressive (video+audio in one) streams first, then adaptive
+        seen_heights = set()
+        res_buttons  = []
+
+        # Pass 1: progressive streams (vcodec + acodec both set, not "none")
+        for f in sorted(formats, key=lambda x: x.get("height") or 0, reverse=True):
             h = f.get("height")
-            if h and h not in seen and f.get("ext") in ("mp4", "webm"):
-                buttons.append([InlineKeyboardButton(f"🎬 {h}p", callback_data=f"yt_vid|{h}|{m.id}")])
-                seen.add(h)
-        buttons.append([InlineKeyboardButton("🎵 MP3", callback_data=f"yt_aud|mp3|{m.id}")])
+            if not h or h in seen_heights: continue
+            vc = f.get("vcodec", "none")
+            ac = f.get("acodec", "none")
+            if vc != "none" and ac != "none":
+                seen_heights.add(h)
+                res_buttons.append((h, "progressive"))
+
+        # Pass 2: adaptive heights not already covered
+        for f in sorted(formats, key=lambda x: x.get("height") or 0, reverse=True):
+            h = f.get("height")
+            if not h or h in seen_heights: continue
+            if f.get("vcodec", "none") != "none":
+                seen_heights.add(h)
+                res_buttons.append((h, "adaptive"))
+
+        if not res_buttons:
+            # Fallback: offer fixed standard resolutions
+            res_buttons = [(1080, "adaptive"), (720, "adaptive"),
+                           (480, "adaptive"), (360, "adaptive")]
+
+        # ── Build keyboard ────────────────────────────────────────────────
+        buttons = []
+        row     = []
+        for h, kind in res_buttons:
+            label     = f"🎬 {h}p"
+            cb_data   = f"yl_vid|{h}|{kind}|{m.id}"
+            row.append(InlineKeyboardButton(label, callback_data=cb_data))
+            if len(row) == 3:           # 3 resolution buttons per row
+                buttons.append(row); row = []
+        if row:
+            buttons.append(row)
+
+        # Audio row
+        buttons.append([
+            InlineKeyboardButton("🎵 MP3 (320kbps)", callback_data=f"yl_aud|mp3|{m.id}"),
+        ])
         buttons.append([InlineKeyboardButton("✖️ Cancel", callback_data="close_help")])
+
         ytdl_session[m.id] = {"url": url, "user_id": m.from_user.id, "message": m}
-        await msg.edit_text("Select Quality:", reply_markup=InlineKeyboardMarkup(buttons))
+
+        await msg.edit_text(
+            f"🎬 **{title}**\n\nSelect quality:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
     except Exception as e:
-        await msg.edit_text(f"❌ Error Fetching Info:\n{str(e)}")
+        await msg.edit_text(f"❌ **Error fetching formats:**\n`{str(e)}`")
 
 
-@app.on_callback_query(filters.regex(r"^yt_"))
-async def ytdl_cb(client, cq: CallbackQuery):
-    data = cq.data.split("|")
-    mode, quality, msg_id = data[0], data[1], int(data[2])
+# ── Callback: quality selection ───────────────────────────────────────────────
+@app.on_callback_query(filters.regex(r"^yl_"))
+async def ytleech_quality_callback(client, cq: CallbackQuery):
+    parts  = cq.data.split("|")
+    mode   = parts[0]           # yl_vid  or  yl_aud
+    msg_id = int(parts[-1])
+
     session = ytdl_session.get(msg_id)
     if not session:
-        await safe_answer(cq, "❌ Expired", show_alert=True); return
+        await safe_answer(cq, "❌ Session expired. Please send the link again.", show_alert=True)
+        return
     await safe_answer(cq)
 
-    if mode == "yt_vid":
-        f_id  = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
-        label = f"{quality}p"
-    else:
+    is_audio = (mode == "yl_aud")
+
+    if is_audio:
+        # Audio: yt-dlp + FFmpegExtractAudio handles conversion
         f_id  = "bestaudio/best"
-        label = "MP3"
+        label = "🎵 MP3 (320kbps)"
+    else:
+        height = parts[1]     # e.g. "1080"
+        kind   = parts[2]     # "progressive" or "adaptive"
+        label  = f"🎬 {height}p"
+
+        if kind == "progressive":
+            # Single-file stream — already has audio, no merge needed
+            f_id = (
+                f"best[height<={height}][vcodec!=none][acodec!=none]"
+                f"/best[height<={height}]"
+                f"/best"
+            )
+        else:
+            # Adaptive: separate video+audio tracks merged by ffmpeg → mp4
+            f_id = (
+                f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={height}]+bestaudio"
+                f"/best[height<={height}]"
+                f"/best"
+            )
 
     orig_msg   = session["message"]
     user_id    = session["user_id"]
     user_label = get_user_label(orig_msg)
 
-    await cq.message.edit_text(f"⏳ Starting Download: {label}...")
+    await cq.message.edit_text(f"⏳ **Starting download:** {label}...")
 
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     await get_or_create_dashboard(user_id, orig_msg, user_label)
 
     pseudo_gid = f"ytdl_{msg_id}_{int(time.time())}"
     task = DownloadTask(pseudo_gid, user_id)
-    task.dl["peer_line"] = "├ Engine → YT-DLP\n"
+    task.dl["peer_line"] = "├ **Engine** → YT-DLP\n"
     active_downloads[pseudo_gid] = task
 
-    asyncio.create_task(process_ytdl_task(orig_msg, task, session["url"], f_id))
+    asyncio.create_task(
+        process_ytdl_task(orig_msg, task, session["url"], f_id, is_audio=is_audio)
+    )
     ytdl_session.pop(msg_id, None)
 
 
@@ -734,7 +812,7 @@ async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = 
                     await push_dashboard_update(task.user_id)
 
         if file_path.endswith(".zip"):
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             def do_zip():
                 with zipfile.ZipFile(file_path, "r") as zf:
                     ms = zf.infolist(); n = len(ms); ut = sum(m.file_size for m in ms); done = 0
@@ -751,7 +829,7 @@ async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = 
                 tu = sum(getattr(m, "uncompressed", 0) or 0 for m in ms)
                 done = 0; tick = 0
                 class _CB(py7zr.callbacks.ExtractCallback):
-                    def __init__(s): s.fi = 0; s.cur_path = ""; s.loop = asyncio.get_event_loop()
+                    def __init__(s): s.fi = 0; s.cur_path = ""; s.loop = asyncio.get_running_loop()
                     def report_start_preparation(s): pass
                     def report_start(s, p, b): s.fi += 1; s.cur_path = str(p)
                     def report_update(s, b): pass
@@ -772,7 +850,7 @@ async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = 
 
         elif file_path.endswith((".tar.gz", ".tgz", ".tar")):
             import tarfile
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             def do_tar():
                 with tarfile.open(file_path, "r:*") as tf:
                     ms = tf.getmembers(); n = len(ms); tu = sum(m.size for m in ms); done = 0
@@ -835,15 +913,13 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
                     await push_dashboard_update(user_id)
 
             fc = caption or cn
-            
-            # Send the file and store the message object
+
             sent_msg = None
             if as_video and file_path.lower().endswith(video_exts):
                 sent_msg = await message.reply_video(video=file_path, caption=fc, progress=_progress, supports_streaming=True, disable_notification=True)
             else:
                 sent_msg = await message.reply_document(document=file_path, caption=fc, progress=_progress, disable_notification=True)
 
-            # Copy to Dump Channel if enabled
             if sent_msg and dump_channel:
                 try:
                     await sent_msg.copy(dump_channel)
@@ -898,7 +974,6 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
                 else:
                     sent_msg = await message.reply_document(document=fp, caption=cap, disable_notification=True)
 
-                # Copy to Dump Channel if enabled
                 if sent_msg and dump_channel:
                     try:
                         await sent_msg.copy(dump_channel)
@@ -990,33 +1065,25 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
 
 @app.on_message(filters.command(["setdump"]))
 async def set_dump_channel(client, message: Message):
-    # Security check: Only allow the OWNER_ID to use this command
     if message.from_user.id != OWNER_ID:
         return await message.reply_text("❌ **Access Denied:** Only the bot owner can configure the dump channel.")
 
     args = message.text.split()
     if len(args) < 3:
         return await message.reply_text("❌ **Usage:** `/setdump <channel_id> -on` or `/setdump <channel_id> -off`\n*(Make sure the bot is an admin in the channel)*")
-    
+
     try:
         channel_id = int(args[1])
         flag = args[2].lower()
-
         if flag not in ["-on", "-off"]:
             return await message.reply_text("❌ **Invalid flag.** Use `-on` to enable or `-off` to disable.")
 
         is_enabled = (flag == "-on")
-
-        # Save to DB
         await settings_col.update_one(
             {"_id": "global_dump"},
-            {"$set": {
-                "channel_id": channel_id,
-                "enabled": is_enabled
-            }},
+            {"$set": {"channel_id": channel_id, "enabled": is_enabled}},
             upsert=True
         )
-        
         state_msg = "🟢 **ENABLED**" if is_enabled else "🔴 **DISABLED**"
         await message.reply_text(
             f"✅ **Dump Channel Updated!**\n\n"
@@ -1063,31 +1130,23 @@ async def universal_leech_command(client, message: Message):
 @app.on_message(filters.document)
 async def handle_document_upload(client, message: Message):
     file_name = message.document.file_name or ""
-    
-    # 1. Handle Admin Cookies Upload
+
     if file_name == "cookies.txt":
         if message.from_user.id != OWNER_ID:
             return await message.reply_text("❌ **Access Denied:** Only the bot owner can upload cookies.")
-            
         msg = await message.reply_text("⏳ Processing `cookies.txt`...")
         file_path = await message.download()
-        
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 cookie_data = f.read()
-
-            # Save to MongoDB
             await settings_col.update_one(
                 {"_id": "ytdl_cookies"},
                 {"$set": {"content": cookie_data}},
                 upsert=True
             )
-
-            # Sync locally for immediate yt-dlp use
             local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
             with open(local_cookie_path, "w", encoding="utf-8") as f:
                 f.write(cookie_data)
-
             await msg.edit_text("✅ **`cookies.txt` successfully saved to Database and synced to Local!**")
         except Exception as e:
             await msg.edit_text(f"❌ **Error saving cookies:** `{str(e)}`")
@@ -1096,7 +1155,6 @@ async def handle_document_upload(client, message: Message):
                 os.remove(file_path)
         return
 
-    # 2. Handle standard torrent upload
     if file_name.endswith(".torrent"):
         try:
             user_id = message.from_user.id; user_label = get_user_label(message)
@@ -1156,9 +1214,10 @@ async def help_command(client, message: Message):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Close", callback_data="close_help")]])
     await message.reply_text(
         "**📖 Leech Bot — Help & Commands**\n\n"
-        "**📥 Commands:**\n"
-        "• `/ql <link1> <link2>` — Download multiple links at once\n"
-        "• `/leech <link>` — Standard download\n"
+        "**📥 Download Commands:**\n"
+        "• `/yl <URL>` or `/ytleech <URL>` — YouTube/media download with quality picker\n"
+        "• `/ql <link1> <link2>` — Download multiple direct/magnet links at once\n"
+        "• `/leech <link>` — Standard direct link download\n"
         "• `/leech <link> -e` — Download & auto-extract archive\n"
         "• **Upload a `.torrent` file** directly to start\n\n"
         "**⚙️ Control:**\n"
@@ -1166,6 +1225,8 @@ async def help_command(client, message: Message):
         "• `/stop <task_id>` — Cancel an active task\n"
         "• `/setdump <channel_id> -on/-off` — Manage global dump channel (Owner Only)\n\n"
         "**✨ Features:**\n"
+        "✓ Quality picker: real resolutions fetched from YouTube\n"
+        "✓ MP3 at 320kbps via FFmpeg postprocessor\n"
         "✓ Paginated dashboard — 4 tasks per page with ◀ Prev / Next ▶\n"
         "✓ ONE dashboard message per user, auto-refreshes every 15s\n"
         "✓ FloodWait eliminated via serialised edit queue\n"
@@ -1184,28 +1245,19 @@ async def settings_command(client, message: Message):
     uid = message.from_user.id
     av  = user_settings.get(uid, {}).get("as_video", False)
     mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
-    
-    kb_buttons = [
-        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]
-    ]
-
-    # Admin Settings
+    kb_buttons = [[InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]]
     if uid == OWNER_ID:
-        cookie_doc = await settings_col.find_one({"_id": "ytdl_cookies"})
+        cookie_doc  = await settings_col.find_one({"_id": "ytdl_cookies"})
         has_cookies = bool(cookie_doc and cookie_doc.get("content"))
-        
         if has_cookies:
             kb_buttons.append([InlineKeyboardButton("🗑 Delete Cookies.txt", callback_data="delete_cookies")])
         else:
             kb_buttons.append([InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")])
-
     kb_buttons.append([InlineKeyboardButton("🗑 Close", callback_data="close_help")])
-    kb = InlineKeyboardMarkup(kb_buttons)
-    
     await message.reply_text(
         "⚙️ **Upload Settings**\n\nChoose how video files (.mp4, .mkv, .webm) are sent.\n"
-        "*(Admins can also manage YT-DLP cookies here)*", 
-        reply_markup=kb
+        "*(Admins can also manage YT-DLP cookies here)*",
+        reply_markup=InlineKeyboardMarkup(kb_buttons)
     )
 
 
@@ -1214,24 +1266,17 @@ async def toggle_mode_callback(client, cq: CallbackQuery):
     _, uid_str = cq.data.split(":"); uid = int(uid_str)
     if cq.from_user.id != uid:
         await safe_answer(cq, "❌ These aren't your settings!", show_alert=True); return
-        
     cur = user_settings.get(uid, {}).get("as_video", False)
     user_settings.setdefault(uid, {})["as_video"] = not cur
     mt = "🎬 Video (Playable)" if not cur else "📄 Document (File)"
-    
-    kb_buttons = [
-        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]
-    ]
-    
+    kb_buttons = [[InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]]
     if uid == OWNER_ID:
         cookie_doc = await settings_col.find_one({"_id": "ytdl_cookies"})
         if cookie_doc and cookie_doc.get("content"):
             kb_buttons.append([InlineKeyboardButton("🗑 Delete Cookies.txt", callback_data="delete_cookies")])
         else:
             kb_buttons.append([InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")])
-
     kb_buttons.append([InlineKeyboardButton("🗑 Close", callback_data="close_help")])
-    
     await cq.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_buttons))
     await safe_answer(cq, f"✅ Switched to {mt}!")
 
@@ -1240,28 +1285,19 @@ async def toggle_mode_callback(client, cq: CallbackQuery):
 async def delete_cookies_callback(client, cq: CallbackQuery):
     if cq.from_user.id != OWNER_ID:
         return await safe_answer(cq, "❌ Access Denied!", show_alert=True)
-
-    # Remove from MongoDB
     await settings_col.delete_one({"_id": "ytdl_cookies"})
-
-    # Remove locally
     local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
     if os.path.exists(local_cookie_path):
         try: os.remove(local_cookie_path)
         except: pass
-
     await safe_answer(cq, "✅ Cookies deleted successfully!", show_alert=True)
-
-    # Refresh the UI Keyboard
-    av  = user_settings.get(OWNER_ID, {}).get("as_video", False)
-    mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
-    
+    av = user_settings.get(OWNER_ID, {}).get("as_video", False)
+    mt = "🎬 Video (Playable)" if av else "📄 Document (File)"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{OWNER_ID}")],
         [InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")],
         [InlineKeyboardButton("🗑 Close", callback_data="close_help")]
     ])
-    
     await cq.edit_message_reply_markup(reply_markup=kb)
 
 
@@ -1292,8 +1328,7 @@ async def main():
     print(f"⏱️  Min edit gap   : {MIN_EDIT_GAP}s")
     print(f"📄 Tasks per page  : {TASKS_PER_PAGE}")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    
-    # Sync DB cookies to local file for yt-dlp at startup
+
     local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
     cookie_doc = await settings_col.find_one({"_id": "ytdl_cookies"})
     if cookie_doc and cookie_doc.get("content"):
@@ -1306,8 +1341,7 @@ async def main():
             print("🗑 Cleared stale local cookies.")
 
     await app.start()
-    
-    # Send restart message to OWNER PM
+
     try:
         await app.send_message(OWNER_ID, "✅ **Bot Restarted Successfully!**")
         print(f"✅ Restart notification sent to Owner ({OWNER_ID})")
