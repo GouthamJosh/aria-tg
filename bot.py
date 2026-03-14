@@ -49,11 +49,12 @@ mongo_client = AsyncIOMotorClient(MONGO_URL)
 db = mongo_client["leech_bot_db"]
 settings_col = db["settings"]
 
-active_downloads = {}
-user_settings    = {}
-user_dashboards  = {}
-user_edit_queues = {}
-ytdl_session     = {}
+active_downloads  = {}
+user_settings     = {}
+user_dashboards   = {}
+user_edit_queues  = {}
+ytdl_session      = {}
+_dashboard_locks  = {}   # per-user asyncio.Lock to prevent duplicate dashboard creation
 
 class DownloadTask:
     def __init__(self, gid: str, user_id: int, extract: bool = False):
@@ -133,6 +134,8 @@ def format_size(b: int) -> str:
 
 def format_time(s: float) -> str:
     if s <= 0: return "0s"
+    # Cap runaway ETAs that aria2 emits when speed is near-zero
+    if s > 359999: return "∞"
     h, m, s = int(s//3600), int((s%3600)//60), int(s%60)
     if h: return f"{h}h {m}m {s}s"
     if m: return f"{m}m {s}s"
@@ -389,6 +392,7 @@ async def dashboard_loop(user_id: int):
                 await dash["msg"].edit_text("✅ **All tasks completed!**", reply_markup=None)
             except Exception: pass
             user_dashboards.pop(user_id, None)
+            _dashboard_locks.pop(user_id, None)
             break
         if time.time() < dash.get("flood_until", 0):
             left = int(dash["flood_until"] - time.time())
@@ -399,21 +403,28 @@ async def dashboard_loop(user_id: int):
         await _enqueue_edit(user_id)
 
 async def get_or_create_dashboard(user_id: int, trigger_msg: Message, user_label: str) -> Message:
-    dash = user_dashboards.get(user_id)
-    if dash:
-        dash["user_label"] = user_label
-        return dash["msg"]
-    msg = await trigger_msg.reply_text(
-        "⏳ **Initialising...**",
-        reply_markup=dashboard_keyboard(user_id, 0, 1),
-    )
-    user_dashboards[user_id] = {
-        "msg": msg, "flood_until": 0.0, "user_label": user_label,
-        "last_text": "", "last_edit_at": 0.0,
-        "page": 0,
-    }
-    asyncio.create_task(dashboard_loop(user_id))
-    return msg
+    # BUG FIX: When multiple torrents/links arrive simultaneously, concurrent calls
+    # all see user_dashboards.get(user_id) == None before any one of them sets it,
+    # so each creates its own "Initialising..." message. A per-user asyncio.Lock
+    # ensures only the first caller does the send; the rest reuse the same message.
+    if user_id not in _dashboard_locks:
+        _dashboard_locks[user_id] = asyncio.Lock()
+    async with _dashboard_locks[user_id]:
+        dash = user_dashboards.get(user_id)
+        if dash:
+            dash["user_label"] = user_label
+            return dash["msg"]
+        msg = await trigger_msg.reply_text(
+            "⏳ **Initialising...**",
+            reply_markup=dashboard_keyboard(user_id, 0, 1),
+        )
+        user_dashboards[user_id] = {
+            "msg": msg, "flood_until": 0.0, "user_label": user_label,
+            "last_text": "", "last_edit_at": 0.0,
+            "page": 0,
+        }
+        asyncio.create_task(dashboard_loop(user_id))
+        return msg
 
 async def safe_answer(cq, text: str = "", show_alert: bool = False):
     try:
@@ -784,6 +795,10 @@ async def poll_download_progress(task: DownloadTask):
             dl = aria2.get_download(task.gid)
             if dl.is_complete: break
             _eta = dl.eta
+            raw_eta = _eta.total_seconds() if _eta and _eta.total_seconds() > 0 else 0
+            # aria2 emits huge ETA values (billions of seconds) when speed is ~0.
+            # Clamp to 100 hours max; format_time will render anything above that as ∞.
+            clamped_eta = min(raw_eta, 360000)
             task.dl.update({
                 "filename":   clean_filename(dl.name if dl.name else "Connecting..."),
                 "progress":   dl.progress or 0.0,
@@ -791,7 +806,7 @@ async def poll_download_progress(task: DownloadTask):
                 "downloaded": dl.completed_length or 0,
                 "total":      dl.total_length or 0,
                 "elapsed":    time.time() - task.start_time,
-                "eta":        _eta.total_seconds() if _eta and _eta.total_seconds() > 0 else 0,
+                "eta":        clamped_eta,
             })
             task.filename  = task.dl["filename"]
             task.file_size = task.dl["total"]
