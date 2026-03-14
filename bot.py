@@ -585,7 +585,16 @@ async def download_ytdl(url: str, task: DownloadTask, format_id: str, is_audio: 
         candidate = base + ext
         if os.path.exists(candidate):
             return candidate
-    return raw_path
+    # BUG FIX: previously returned raw_path unconditionally here, but raw_path is
+    # the pre-postprocessing filename (e.g. .webm) which no longer exists after
+    # FFmpeg postprocessing. Raise a clear error instead of silently returning a
+    # path that will cause a file-not-found crash at upload time.
+    if os.path.exists(raw_path):
+        return raw_path
+    raise FileNotFoundError(
+        f"yt-dlp finished but output file not found. "
+        f"Expected one of: {[base + e for e in search_exts]}"
+    )
 
 
 async def process_ytdl_task(message: Message, task: DownloadTask, url: str,
@@ -843,29 +852,48 @@ async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = 
             return await loop.run_in_executor(executor, do_zip)
 
         elif file_path.endswith(".7z"):
-            with py7zr.SevenZipFile(file_path, mode="r") as arc:
-                ms = arc.list(); n = len(ms)
-                tu = sum(getattr(m, "uncompressed", 0) or 0 for m in ms)
-                done = 0; tick = 0
-                class _CB(py7zr.callbacks.ExtractCallback):
-                    def __init__(s): s.fi = 0; s.cur_path = ""; s.loop = asyncio.get_running_loop()
-                    def report_start_preparation(s): pass
-                    def report_start(s, p, b): s.fi += 1; s.cur_path = str(p)
-                    def report_update(s, b): pass
-                    def report_end(s, p, wrote):
-                        nonlocal done, tick; done += wrote; tick += 1
-                        if tick % 5 == 0:
-                            asyncio.run_coroutine_threadsafe(
-                                _update(done, tu or total_size, s.cur_path, s.fi, n), s.loop)
-                    def report_postprocess(s): pass
-                    def report_warning(s, m): pass
-                try:
-                    arc.extractall(path=extract_to, callback=_CB())
-                    await _update(tu or total_size, tu or total_size, filename, n, n)
-                except TypeError:
-                    arc.extractall(path=extract_to)
-                    await _update(total_size, total_size, filename, 1, 1)
-            return True
+            # BUG FIX: py7zr extractall() is CPU-bound and was running directly on
+            # the async event loop, blocking all other coroutines during extraction.
+            # Run it in the executor just like the .zip and .tar branches.
+            loop = asyncio.get_running_loop()
+            extracted_stats = {"done": 0, "total_files": 0, "uncompressed": 0}
+
+            def do_7z():
+                with py7zr.SevenZipFile(file_path, mode="r") as arc:
+                    ms = arc.list()
+                    n  = len(ms)
+                    tu = sum(getattr(m, "uncompressed", 0) or 0 for m in ms)
+                    extracted_stats["total_files"]  = n
+                    extracted_stats["uncompressed"] = tu
+                    done_ref = [0]; tick_ref = [0]
+
+                    class _CB(py7zr.callbacks.ExtractCallback):
+                        def __init__(s): s.fi = 0; s.cur_path = ""
+                        def report_start_preparation(s): pass
+                        def report_start(s, p, b): s.fi += 1; s.cur_path = str(p)
+                        def report_update(s, b): pass
+                        def report_end(s, p, wrote):
+                            done_ref[0] += wrote; tick_ref[0] += 1
+                            if tick_ref[0] % 5 == 0:
+                                asyncio.run_coroutine_threadsafe(
+                                    _update(done_ref[0], tu or total_size, s.cur_path, s.fi, n),
+                                    loop,
+                                )
+                        def report_postprocess(s): pass
+                        def report_warning(s, m): pass
+
+                    try:
+                        arc.extractall(path=extract_to, callback=_CB())
+                    except TypeError:
+                        arc.extractall(path=extract_to)
+                    extracted_stats["done"] = done_ref[0]
+                return True
+
+            result = await loop.run_in_executor(executor, do_7z)
+            tu_final = extracted_stats["uncompressed"] or total_size
+            await _update(tu_final, tu_final, filename,
+                          extracted_stats["total_files"], extracted_stats["total_files"])
+            return result
 
         elif file_path.endswith((".tar.gz", ".tgz", ".tar")):
             import tarfile
@@ -1047,9 +1075,21 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
         try:
             fdl = aria2.get_download(task.gid)
             fp  = os.path.join(DOWNLOAD_DIR, fdl.name)
-            # For multi-file torrents aria2 creates a directory — use it directly
+            # For multi-file torrents aria2 creates a directory — use it directly.
+            # BUG FIX: task.dl["filename"] is the cleaned display name and may not
+            # match the real file on disk. Use aria2's own fdl.name as source of
+            # truth; if that path is also missing, scan DOWNLOAD_DIR for the most
+            # recently modified entry as a last resort.
             if not os.path.exists(fp):
-                fp = os.path.join(DOWNLOAD_DIR, task.dl["filename"])
+                try:
+                    entries = [
+                        os.path.join(DOWNLOAD_DIR, e)
+                        for e in os.listdir(DOWNLOAD_DIR)
+                    ]
+                    if entries:
+                        fp = max(entries, key=os.path.getmtime)
+                except Exception:
+                    pass  # keep fp as is; upload step will report the error
         except Exception:
             fp = os.path.join(DOWNLOAD_DIR, task.dl["filename"])
         task.file_path = fp
