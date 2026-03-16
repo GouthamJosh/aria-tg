@@ -17,6 +17,7 @@ import shutil
 import psutil
 from concurrent.futures import ThreadPoolExecutor
 from motor.motor_asyncio import AsyncIOMotorClient
+import aiohttp  # Added for hoster API calls
 
 from config import (
     API_ID, API_HASH, BOT_TOKEN, OWNER_ID,
@@ -455,7 +456,7 @@ async def dashboard_refresh_callback(client, cq: CallbackQuery):
         await safe_answer(cq, "⚠️ No active tasks.", show_alert=True); return
     now = time.time()
     if now < dash.get("flood_until", 0):
-        left = int(dash["flood_until"] - now)
+        left = int(dash["flood_until"] - time.time())
         await safe_answer(cq, f"⏳ Rate limit active — auto-refresh resumes in {left}s", show_alert=True); return
     if now - dash.get("last_edit_at", 0) < MIN_EDIT_GAP:
         gap = int(MIN_EDIT_GAP - (now - dash.get("last_edit_at", 0)))
@@ -843,6 +844,294 @@ async def poll_download_progress(task: DownloadTask):
         await asyncio.sleep(3)
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  HOSTER SUPPORT: MediaFire, PixelDrain, GoFile
+# ══════════════════════════════════════════════════════════════════════
+
+async def extract_mediafire_direct(url: str) -> str | None:
+    """Extract direct download URL from MediaFire link."""
+    try:
+        # MediaFire file ID extraction patterns
+        patterns = [
+            r'https?://(?:www\.)?mediafire\.com/file/([a-zA-Z0-9]+)',
+            r'https?://(?:www\.)?mediafire\.com/view/([a-zA-Z0-9]+)',
+            r'https?://(?:www\.)?mediafire\.com/\?([a-zA-Z0-9]+)',
+            r'https?://(?:www\.)?mediafire\.com/file_premium/([a-zA-Z0-9]+)',
+        ]
+        
+        file_id = None
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                file_id = match.group(1)
+                break
+        
+        if not file_id:
+            return None
+        
+        # Try to get direct link via API/scraping approach
+        api_url = f"https://www.mediafire.com/api/1.4/file/get_info.php?quick_key={file_id}&response_format=json"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if 'response' in data and 'file_info' in data['response']:
+                        file_info = data['response']['file_info']
+                        if 'links' in file_info and 'normal_download' in file_info['links']:
+                            return file_info['links']['normal_download']
+        
+        # Fallback: use external bypass service if API fails
+        bypass_url = f"https://bypass-beta.vercel.app/api/mediafire?url={url}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(bypass_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if 'bypassed' in data:
+                        return data['bypassed']
+        
+        return None
+    except Exception as e:
+        print(f"MediaFire extraction error: {e}")
+        return None
+
+
+async def extract_pixeldrain_direct(url: str) -> str | None:
+    """Extract direct download URL from PixelDrain link."""
+    try:
+        # PixelDrain ID extraction
+        patterns = [
+            r'https?://(?:www\.)?pixeldrain\.com/u/([a-zA-Z0-9\-_]+)',
+            r'https?://(?:www\.)?pixeldrain\.com/api/file/([a-zA-Z0-9\-_]+)',
+        ]
+        
+        file_id = None
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                file_id = match.group(1)
+                break
+        
+        if not file_id:
+            return None
+        
+        # PixelDrain direct download API
+        direct_url = f"https://pixeldrain.com/api/file/{file_id}?download"
+        
+        # Verify the link works by getting file info first
+        info_url = f"https://pixeldrain.com/api/file/{file_id}/info"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(info_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('success', False):
+                        return direct_url
+        
+        return None
+    except Exception as e:
+        print(f"PixelDrain extraction error: {e}")
+        return None
+
+
+async def extract_gofile_direct(url: str) -> tuple[str, str] | None:
+    """Extract direct download URL from GoFile link. Returns (direct_url, filename)."""
+    try:
+        # GoFile ID extraction patterns
+        patterns = [
+            r'https?://(?:www\.)?gofile\.io/d/([a-zA-Z0-9]+)',
+            r'https?://gofile\.io/\?c=([a-zA-Z0-9]+)',
+            r'https?://(?:www\.)?gofile\.io/d/([a-zA-Z0-9]+)\?.*',
+        ]
+        
+        content_id = None
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                content_id = match.group(1)
+                break
+        
+        if not content_id:
+            return None
+        
+        # Get best server and file info
+        async with aiohttp.ClientSession() as session:
+            # First, get available servers
+            async with session.get("https://api.gofile.io/servers", timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    return None
+                servers_data = await resp.json()
+                if not servers_data.get('status') == 'ok':
+                    return None
+                servers = servers_data.get('data', {}).get('servers', [])
+                if not servers:
+                    return None
+                best_server = servers[0]['name']
+            
+            # Get content info
+            content_url = f"https://{best_server}.gofile.io/contents/{content_id}?wt=4fd6sg89d7s6&cache=true"
+            async with session.get(content_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    return None
+                content_data = await resp.json()
+                
+                if not content_data.get('status') == 'ok':
+                    return None
+                
+                contents = content_data.get('data', {}).get('contents', {})
+                if not contents:
+                    return None
+                
+                # Get first file (GoFile usually has one file per link)
+                for file_id, file_info in contents.items():
+                    if file_info.get('type') == 'file':
+                        direct_link = file_info.get('link')
+                        filename = file_info.get('name', 'unknown')
+                        if direct_link:
+                            return (direct_link, filename)
+        
+        return None
+    except Exception as e:
+        print(f"GoFile extraction error: {e}")
+        return None
+
+
+def is_special_hoster(url: str) -> str | None:
+    """Check if URL is from a supported special hoster. Returns hoster name or None."""
+    hosters = {
+        'mediafire': r'https?://(?:www\.)?mediafire\.com',
+        'pixeldrain': r'https?://(?:www\.)?pixeldrain\.com',
+        'gofile': r'https?://(?:www\.)?gofile\.io',
+    }
+    
+    for name, pattern in hosters.items():
+        if re.search(pattern, url, re.IGNORECASE):
+            return name
+    return None
+
+
+async def process_hoster_link(url: str, message: Message, task: DownloadTask, extract: bool):
+    """Process a special hoster link and download via aria2."""
+    hoster = is_special_hoster(url)
+    direct_url = None
+    custom_filename = None
+    
+    if hoster == 'mediafire':
+        direct_url = await extract_mediafire_direct(url)
+    elif hoster == 'pixeldrain':
+        direct_url = await extract_pixeldrain_direct(url)
+    elif hoster == 'gofile':
+        result = await extract_gofile_direct(url)
+        if result:
+            direct_url, custom_filename = result
+    
+    if not direct_url:
+        await message.reply_text(f"❌ **Failed to extract direct link from {hoster}**\nMake sure the link is valid and public.")
+        cleanup_files(task)
+        active_downloads.pop(task.gid, None)
+        return
+    
+    # Update task with filename if extracted
+    if custom_filename:
+        task.dl["filename"] = clean_filename(custom_filename)
+        task.filename = custom_filename
+    
+    # Add to aria2 for download
+    try:
+        opts = {**DIRECT_OPTIONS}
+        if custom_filename:
+            opts['out'] = custom_filename
+            
+        dl = await aria2_run(aria2.add_uris, [direct_url], options=opts)
+        task.gid = dl.gid
+        active_downloads[dl.gid] = task
+        
+        # Now process as regular aria2 download
+        asyncio.create_task(poll_download_progress(task))
+        await push_dashboard_update(task.user_id)
+        
+        while not task.cancelled:
+            await asyncio.sleep(2)
+            try: 
+                cdl = await aria2_run(aria2.get_download, task.gid)
+            except Exception: 
+                break
+            fb = getattr(cdl, "followed_by", None)
+            if fb:
+                new_gid = fb[0].gid if hasattr(fb[0], "gid") else fb[0]
+                old_gid = task.gid; task.gid = new_gid
+                active_downloads[new_gid] = task; active_downloads.pop(old_gid, None)
+                continue
+            if cdl.is_complete: 
+                break
+            elif getattr(cdl, "has_failed", False):
+                active_downloads.pop(task.gid, None)
+                task.cancelled = True
+                await message.reply_text(f"❌ **Download Error:** `{cdl.error_message}`")
+                cleanup_files(task)
+                await push_dashboard_update(task.user_id)
+                return
+        
+        if task.cancelled:
+            try:
+                _dl_to_remove = await aria2_run(aria2.get_download, task.gid)
+                await aria2_run(aria2.remove, [_dl_to_remove], force=True, files=True)
+            except Exception: 
+                pass
+            cleanup_files(task)
+            active_downloads.pop(task.gid, None)
+            await push_dashboard_update(task.user_id)
+            return
+        
+        # Get downloaded file path
+        try:
+            fdl = await aria2_run(aria2.get_download, task.gid)
+            fp = os.path.join(DOWNLOAD_DIR, fdl.name)
+            if not os.path.exists(fp):
+                # Fallback: find most recent file
+                try:
+                    entries = [os.path.join(DOWNLOAD_DIR, e) for e in os.listdir(DOWNLOAD_DIR)]
+                    if entries:
+                        fp = max(entries, key=os.path.getmtime)
+                except Exception:
+                    pass
+        except Exception:
+            fp = os.path.join(DOWNLOAD_DIR, task.dl["filename"])
+        
+        task.file_path = fp
+        
+        # Extract if needed
+        if extract and os.path.isfile(fp) and fp.endswith((".zip", ".7z", ".tar.gz", ".tgz", ".tar")):
+            if task.cancelled:
+                cleanup_files(task)
+                active_downloads.pop(task.gid, None)
+                await push_dashboard_update(task.user_id)
+                return
+            ed = os.path.join(DOWNLOAD_DIR, f"extracted_{int(time.time())}")
+            os.makedirs(ed, exist_ok=True)
+            task.extract_dir = ed
+            us, cap = (ed, "📁 Extracted files") if await extract_archive(fp, ed, task=task) else (fp, "")
+        else:
+            us, cap = fp, ""
+        
+        if task.cancelled:
+            cleanup_files(task)
+            active_downloads.pop(task.gid, None)
+            await push_dashboard_update(task.user_id)
+            return
+        
+        await upload_to_telegram(us, message, caption=cap, task=task)
+        cleanup_files(task)
+        active_downloads.pop(task.gid, None)
+        await push_dashboard_update(task.user_id)
+        
+    except Exception as e:
+        await message.reply_text(f"❌ **Hoster Download Error:** `{str(e)}`")
+        cleanup_files(task)
+        active_downloads.pop(task.gid, None)
+        await push_dashboard_update(task.user_id)
+
+
 # ── Extract archive ───────────────────────────────────────────────────────────
 async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = None) -> bool:
     try:
@@ -1227,14 +1516,29 @@ async def universal_leech_command(client, message: Message):
     args  = message.text.split()[1:]
     links = [a for a in args if a.startswith("http") or a.startswith("magnet:")]
     if not links:
-        await message.reply_text("❌ **Usage:** `/ql <link1> <link2>` or reply to a `.torrent` file.\n❌ `/l <link>` for direct links"); return
+        await message.reply_text("❌ **Usage:** `/ql <link1> <link2>` or reply to a `.torrent` file.\n❌ `/l <link>` for direct links\n\n**Supported hosters:**\n• Direct HTTP/HTTPS links\n• Magnet links\n• `.torrent` files\n• **MediaFire** - `mediafire.com/file/...`\n• **PixelDrain** - `pixeldrain.com/u/...`\n• **GoFile** - `gofile.io/d/...`"); return
 
     for link in links:
         try:
-            opts = BT_OPTIONS if link.startswith("magnet:") else {**BT_OPTIONS, **DIRECT_OPTIONS}
-            dl   = await aria2_run(aria2.add_uris, [link], options=opts)
-            task = DownloadTask(dl.gid, user_id, extract)
-            asyncio.create_task(process_task_execution(message, task, dl, extract))
+            # Check if it's a special hoster link
+            hoster = is_special_hoster(link)
+            if hoster:
+                # Create pseudo-GID for hoster downloads
+                pseudo_gid = f"{hoster}_{int(time.time())}_{hash(link) % 10000}"
+                task = DownloadTask(pseudo_gid, user_id, extract)
+                task.dl["peer_line"] = f"├ **Engine** → {hoster.upper()}\n"
+                active_downloads[pseudo_gid] = task
+                asyncio.create_task(process_hoster_link(link, message, task, extract))
+            elif link.startswith("magnet:"):
+                dl = await aria2_run(aria2.add_uris, [link], options=BT_OPTIONS)
+                task = DownloadTask(dl.gid, user_id, extract)
+                asyncio.create_task(process_task_execution(message, task, dl, extract))
+            else:
+                # Regular direct link
+                opts = {**BT_OPTIONS, **DIRECT_OPTIONS}
+                dl = await aria2_run(aria2.add_uris, [link], options=opts)
+                task = DownloadTask(dl.gid, user_id, extract)
+                asyncio.create_task(process_task_execution(message, task, dl, extract))
         except Exception as e:
             await message.reply_text(f"❌ **Failed to add:** `{str(e)}`")
 
@@ -1298,7 +1602,7 @@ async def stop_command(client, message: Message):
             await message.reply_text(f"❌ **Task `{gid_short}` not found!**"); return
         found_task.cancelled = True
         try:
-            if not found_task.gid.startswith("ytdl_"):
+            if not found_task.gid.startswith("ytdl_") and not any(found_task.gid.startswith(h) for h in ['mediafire_', 'pixeldrain_', 'gofile_']):
                 _dl_stop = await aria2_run(aria2.get_download, found_task.gid)
                 await aria2_run(aria2.remove, [_dl_stop], force=True, files=True)
             cleanup_files(found_task)
@@ -1333,6 +1637,10 @@ async def help_command(client, message: Message):
         "• `/leech <link>` — Standard direct link download\n"
         "• `/leech <link> -e` — Download & auto-extract archive\n"
         "• **Upload a `.torrent` file** directly to start\n\n"
+        "**🌐 Supported Hoster Links:**\n"
+        "• **MediaFire** — `mediafire.com/file/...`\n"
+        "• **PixelDrain** — `pixeldrain.com/u/...`\n"
+        "• **GoFile** — `gofile.io/d/...`\n\n"
         "**⚙️ Control:**\n"
         "• `/settings` — Toggle Document / Video upload mode & Manage Cookies\n"
         "• `/stop <task_id>` — Cancel an active task\n"
