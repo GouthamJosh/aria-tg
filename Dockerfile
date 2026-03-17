@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1
 # Set working directory
 WORKDIR /app
 
-# Install required system packages
+# Install required system packages + BUILD TOOLS for pycrypto
 RUN apt-get update -qq && \
     apt-get install -y -qq \
         aria2 \
@@ -17,6 +17,10 @@ RUN apt-get update -qq && \
         ca-certificates \
         netcat-openbsd \
         procps \
+        gcc \
+        libc6-dev \
+        libffi-dev \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file FIRST (this leverages Docker layer caching for faster rebuilds)
