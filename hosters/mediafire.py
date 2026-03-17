@@ -1,21 +1,12 @@
 """
 hosters/mediafire.py
 Extract a direct download URL from a MediaFire share link.
-
-Strategy
---------
-1. Parse the file key from the URL.
-2. Hit MediaFire's public file-info API (JSON response) — no login required
-   for public files.
-3. Return the ``normal_download`` link from the API response, or None if
-   the file is private / not found.
 """
 
 from __future__ import annotations
 
 import re
-import aiohttp
-
+from curl_cffi.requests import AsyncSession  # Browser impersonation
 
 # ── Regex patterns for every known MediaFire URL shape ───────────────────────
 _MF_PATTERNS: list[str] = [
@@ -23,7 +14,6 @@ _MF_PATTERNS: list[str] = [
     r"https?://(?:www\.)?mediafire\.com/file_premium/([a-zA-Z0-9]+)",
     r"https?://(?:www\.)?mediafire\.com/view/([a-zA-Z0-9]+)",
     r"https?://(?:www\.)?mediafire\.com/\?([a-zA-Z0-9]+)",
-    # Short-link style: mediafire.com/download/XXXX/filename.ext
     r"https?://(?:www\.)?mediafire\.com/download/([a-zA-Z0-9]+)",
 ]
 
@@ -32,7 +22,7 @@ _API_TMPL = (
     "?quick_key={key}&response_format=json"
 )
 
-_TIMEOUT = aiohttp.ClientTimeout(total=30)
+_TIMEOUT = 30
 
 
 def _extract_key(url: str) -> str | None:
@@ -46,16 +36,6 @@ def _extract_key(url: str) -> str | None:
 async def extract_mediafire_direct(url: str) -> str | None:
     """
     Return the direct download URL for a public MediaFire file, or None.
-
-    Parameters
-    ----------
-    url : str
-        Any valid MediaFire share / view / download URL.
-
-    Returns
-    -------
-    str | None
-        The direct ``normal_download`` URL, or None if extraction fails.
     """
     file_key = _extract_key(url)
     if not file_key:
@@ -65,15 +45,19 @@ async def extract_mediafire_direct(url: str) -> str | None:
     api_url = _API_TMPL.format(key=file_key)
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=_TIMEOUT) as resp:
-                if resp.status != 200:
-                    print(f"[MediaFire] API returned HTTP {resp.status}")
-                    return None
+        # Use curl_cffi with browser impersonation to avoid blocks
+        async with AsyncSession(impersonate="chrome110") as session:
+            resp = await session.get(api_url, timeout=_TIMEOUT)
+            
+            if resp.status_code != 200:
+                print(f"[MediaFire] API returned HTTP {resp.status_code}")
+                # Debug: print response body for troubleshooting
+                print(f"[MediaFire] Response: {resp.text[:200]}")
+                return None
 
-                data = await resp.json(content_type=None)
+            data = resp.json()
 
-        # ── Navigate the JSON response ────────────────────────────────────
+        # Navigate the JSON response
         response_obj = data.get("response", {})
         action       = response_obj.get("action", "")
         result       = response_obj.get("result", "")
@@ -86,7 +70,7 @@ async def extract_mediafire_direct(url: str) -> str | None:
         file_info = response_obj.get("file_info", {})
         links     = file_info.get("links", {})
 
-        # Prefer the uncompressed direct link; fall back to the normal web link
+        # Prefer normal_download, fallback to direct_download
         direct = (
             links.get("normal_download")
             or links.get("direct_download")
@@ -100,4 +84,6 @@ async def extract_mediafire_direct(url: str) -> str | None:
 
     except Exception as exc:
         print(f"[MediaFire] Extraction error: {exc}")
+        import traceback
+        traceback.print_exc()
         return None
