@@ -2,13 +2,13 @@ pyrotgfork
 TgCrypto
 aria2p
 aiohttp
+aiofiles
 py7zr
 psutil
 uvloop
 motor
-curl-cffi
-aiofiles
+curl-cffi>=0.7.0
 yt_dlp
 python-dotenv
-tenacity>=8.2.0,<9.0.0 
-mega.py
+tenacity>=8.2.0,<9.0.0
+megasdk>=1.0.0
