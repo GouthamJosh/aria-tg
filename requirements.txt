@@ -11,3 +11,4 @@ aiofiles
 yt_dlp
 python-dotenv
 mega.py
+tenacity>=8.0.0
