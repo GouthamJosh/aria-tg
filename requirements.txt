@@ -11,4 +11,5 @@ curl-cffi>=0.7.0
 yt_dlp
 python-dotenv
 tenacity>=8.2.0,<9.0.0
-megasdk>=1.0.0
+pycryptodome
+mega.py
