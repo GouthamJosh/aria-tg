@@ -10,3 +10,4 @@ curl-cffi
 aiofiles
 yt_dlp
 python-dotenv
+mega.py
