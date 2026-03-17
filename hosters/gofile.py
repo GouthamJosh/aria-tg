@@ -6,7 +6,7 @@ Extract a direct download URL from a GoFile share link.
 from __future__ import annotations
 
 import re
-from curl_cffi.requests import AsyncSession  # Changed from aiohttp
+from curl_cffi.requests import AsyncSession  # Browser impersonation
 
 _GF_PATTERNS: list[str] = [
     r"https?://(?:www\.)?gofile\.io/d/([a-zA-Z0-9]+)",
@@ -29,13 +29,16 @@ def _extract_id(url: str) -> str | None:
 
 
 async def extract_gofile_direct(url: str) -> tuple[str, str, dict] | None:
+    """
+    Return (direct_url, filename, aria2_extra_opts) for a GoFile link.
+    """
     content_id = _extract_id(url)
     if not content_id:
         print(f"[GoFile] Could not parse content ID from: {url}")
         return None
 
     try:
-        # Use curl_cffi with browser impersonation
+        # Use curl_cffi with Chrome impersonation to bypass TLS fingerprinting
         async with AsyncSession(impersonate="chrome110") as session:
             
             # Step 1: Create guest account
@@ -52,15 +55,19 @@ async def extract_gofile_direct(url: str) -> tuple[str, str, dict] | None:
 
             token = acc_data["data"]["token"]
 
-            # Step 2: Fetch content
-            headers = {"Authorization": f"Bearer {token}"}
+            # Step 2: Fetch content with auth header
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            }
             content_url = _CONTENTS_TMPL.format(id=content_id)
 
             resp = await session.get(content_url, headers=headers, timeout=_TIMEOUT)
+            
             if resp.status_code != 200:
                 print(f"[GoFile] Contents fetch failed — HTTP {resp.status_code}")
-                # Debug: print response body
-                print(f"[GoFile] Response: {resp.text[:200]}")
+                # Debug output
+                print(f"[GoFile] Response: {resp.text[:300]}")
                 return None
 
             content_data = resp.json()
@@ -77,12 +84,14 @@ async def extract_gofile_direct(url: str) -> tuple[str, str, dict] | None:
             print(f"[GoFile] No children/contents found for id={content_id!r}")
             return None
 
+        # Return first file found
         for _, item in children.items():
             if item.get("type") == "file":
                 direct_link = item.get("link") or item.get("directLink")
                 filename = item.get("name", "gofile_download")
 
                 if direct_link:
+                    # aria2 needs the accountToken cookie for auth
                     aria2_opts = {"header": f"Cookie: accountToken={token}"}
                     return (direct_link, filename, aria2_opts)
 
@@ -91,4 +100,6 @@ async def extract_gofile_direct(url: str) -> tuple[str, str, dict] | None:
 
     except Exception as exc:
         print(f"[GoFile] Extraction error: {exc}")
+        import traceback
+        traceback.print_exc()
         return None
