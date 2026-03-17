@@ -10,5 +10,5 @@ curl-cffi
 aiofiles
 yt_dlp
 python-dotenv
+tenacity>=8.2.0,<9.0.0 
 mega.py
-tenacity>=8.0.0
