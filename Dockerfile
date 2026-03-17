@@ -14,9 +14,6 @@ COPY requirements.txt .
 
 # CRITICAL: Install pycryptodome BEFORE mega.py to prevent pycrypto installation
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir pycryptodome && \
-    pip install --no-cache-dir tenacity>=8.2.0 && \
-    pip install --no-cache-dir mega.py && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
