@@ -1,20 +1,22 @@
+# Use lightweight Python base
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# Install system packages + BUILD TOOLS
+# Install system packages (no build tools needed for pycryptodome!)
 RUN apt-get update -qq && \
     apt-get install -y -qq \
         aria2 curl ffmpeg wget ca-certificates netcat-openbsd procps \
-        gcc libc6-dev libffi-dev python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-# Force upgrade tenacity first, then install rest
+# CRITICAL: Install pycryptodome BEFORE mega.py to prevent pycrypto installation
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir pycryptodome && \
     pip install --no-cache-dir tenacity>=8.2.0 && \
+    pip install --no-cache-dir mega.py && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
