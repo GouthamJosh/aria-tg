@@ -1,31 +1,23 @@
 """
 hosters/gofile.py
 Extract a direct download URL from a GoFile share link.
-
-GoFile API v2 requires a bearer token even for public files.
-Steps:
-  1. POST /accounts            → create a guest account → get token
-  2. GET  /contents/{id}       → list files in the folder
-  3. Return (direct_url, filename, aria2_opts) where aria2_opts carries
-     the accountToken cookie that GoFile requires on the download request.
 """
 
 from __future__ import annotations
 
 import re
-import aiohttp
+from curl_cffi.requests import AsyncSession  # Changed from aiohttp
 
 _GF_PATTERNS: list[str] = [
     r"https?://(?:www\.)?gofile\.io/d/([a-zA-Z0-9]+)",
     r"https?://gofile\.io/\?c=([a-zA-Z0-9]+)",
-    # Trailing query string
     r"https?://(?:www\.)?gofile\.io/d/([a-zA-Z0-9]+)\?",
 ]
 
 _ACCOUNTS_URL = "https://api.gofile.io/accounts"
 _CONTENTS_TMPL = "https://api.gofile.io/contents/{id}?wt=4fd6sg89d7s6&cache=true"
 
-_TIMEOUT = aiohttp.ClientTimeout(total=30)
+_TIMEOUT = 30
 
 
 def _extract_id(url: str) -> str | None:
@@ -37,38 +29,22 @@ def _extract_id(url: str) -> str | None:
 
 
 async def extract_gofile_direct(url: str) -> tuple[str, str, dict] | None:
-    """
-    Return ``(direct_url, filename, aria2_extra_opts)`` for a GoFile link.
-
-    ``aria2_extra_opts`` contains the ``header`` key needed so aria2 can
-    authenticate the download request with the guest token cookie.
-
-    Parameters
-    ----------
-    url : str
-        Any ``gofile.io/d/…`` or ``gofile.io/?c=…`` URL.
-
-    Returns
-    -------
-    tuple[str, str, dict] | None
-        ``(direct_url, filename, {"header": "Cookie: accountToken=<token>"})``
-        or None on failure.
-    """
     content_id = _extract_id(url)
     if not content_id:
         print(f"[GoFile] Could not parse content ID from: {url}")
         return None
 
     try:
-        async with aiohttp.ClientSession() as session:
+        # Use curl_cffi with browser impersonation
+        async with AsyncSession(impersonate="chrome110") as session:
+            
+            # Step 1: Create guest account
+            resp = await session.post(_ACCOUNTS_URL, timeout=_TIMEOUT)
+            if resp.status_code != 200:
+                print(f"[GoFile] Account creation failed — HTTP {resp.status_code}")
+                return None
 
-            # ── Step 1: obtain a guest bearer token ───────────────────────
-            async with session.post(_ACCOUNTS_URL, timeout=_TIMEOUT) as resp:
-                if resp.status != 200:
-                    print(f"[GoFile] Account creation failed — HTTP {resp.status}")
-                    return None
-
-                acc_data = await resp.json(content_type=None)
+            acc_data = resp.json()
 
             if acc_data.get("status") != "ok":
                 print(f"[GoFile] Account API error — {acc_data}")
@@ -76,18 +52,18 @@ async def extract_gofile_direct(url: str) -> tuple[str, str, dict] | None:
 
             token = acc_data["data"]["token"]
 
-            # ── Step 2: fetch content metadata ────────────────────────────
-            headers     = {"Authorization": f"Bearer {token}"}
+            # Step 2: Fetch content
+            headers = {"Authorization": f"Bearer {token}"}
             content_url = _CONTENTS_TMPL.format(id=content_id)
 
-            async with session.get(
-                content_url, headers=headers, timeout=_TIMEOUT
-            ) as resp:
-                if resp.status != 200:
-                    print(f"[GoFile] Contents fetch failed — HTTP {resp.status}")
-                    return None
+            resp = await session.get(content_url, headers=headers, timeout=_TIMEOUT)
+            if resp.status_code != 200:
+                print(f"[GoFile] Contents fetch failed — HTTP {resp.status_code}")
+                # Debug: print response body
+                print(f"[GoFile] Response: {resp.text[:200]}")
+                return None
 
-                content_data = await resp.json(content_type=None)
+            content_data = resp.json()
 
         if content_data.get("status") != "ok":
             reason = content_data.get("status", "unknown")
@@ -95,26 +71,18 @@ async def extract_gofile_direct(url: str) -> tuple[str, str, dict] | None:
             return None
 
         data = content_data.get("data", {})
-
-        # API v2 uses "children"; legacy responses used "contents"
         children: dict = data.get("children") or data.get("contents") or {}
 
         if not children:
             print(f"[GoFile] No children/contents found for id={content_id!r}")
             return None
 
-        # Return the first file entry found (most GoFile links are single-file)
         for _, item in children.items():
             if item.get("type") == "file":
-                direct_link: str | None = (
-                    item.get("link")
-                    or item.get("directLink")
-                )
-                filename: str = item.get("name", "gofile_download")
+                direct_link = item.get("link") or item.get("directLink")
+                filename = item.get("name", "gofile_download")
 
                 if direct_link:
-                    # aria2 must send the accountToken cookie so GoFile
-                    # authorises the download without a login page redirect.
                     aria2_opts = {"header": f"Cookie: accountToken={token}"}
                     return (direct_link, filename, aria2_opts)
 
