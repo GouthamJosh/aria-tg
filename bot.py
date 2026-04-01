@@ -24,7 +24,7 @@ from config import (
     DOWNLOAD_DIR, MAX_UPLOAD_BYTES, MAX_UPLOAD_LABEL, OWNER_PREMIUM,
     PORT, ENGINE_DL, ENGINE_UL, ENGINE_EXTRACT,
     DASHBOARD_REFRESH_INTERVAL, MIN_EDIT_GAP,
-    WORKERS, MAX_CONCURRENT_TRANSMISSIONS,
+    WORKERS, MAX_CONCURRENT_TRANSMISSIONS, UPLOAD_PARALLEL_FILES,
     BT_OPTIONS, DIRECT_OPTIONS, TASKS_PER_PAGE,
     MONGO_URL
 )
@@ -995,7 +995,9 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
             async def _progress(current, total):
                 now = time.time()
                 if now - lr[0] < MIN_EDIT_GAP: return
-                dt = now - lt[0]; speed = (current - lu[0]) / dt if dt > 0 else 0
+                dt = now - lt[0]
+                if dt <= 0: return
+                speed = (current - lu[0]) / dt
                 eta = (total - current) / speed if speed > 0 else 0
                 lt[0] = now; lu[0] = current; lr[0] = now
                 if task:
@@ -1031,49 +1033,68 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
 
             n              = len(files)
             total_bytes    = sum(os.path.getsize(fp) for fp in files)
-            uploaded_bytes = 0
             dir_start      = time.time()
 
-            for idx, fp in enumerate(files, 1):
-                if task and task.cancelled:
-                    return False
+            # Shared state for parallel uploads
+            _ul_lock        = asyncio.Lock()
+            _uploaded_bytes = [0]
 
-                smart  = smart_episode_name(fp, file_path)
-                new_fp = os.path.join(os.path.dirname(fp), smart)
-                if fp != new_fp and not os.path.exists(new_fp):
-                    os.rename(fp, new_fp); fp = new_fp
+            # Limit simultaneous Telegram upload streams to avoid flood-wait
+            sem = asyncio.Semaphore(UPLOAD_PARALLEL_FILES)
 
-                file_sz = os.path.getsize(fp)
-                cn      = os.path.basename(fp)
-                cap     = f"📄 {cn} [{idx}/{n}]"
+            async def _upload_one(idx: int, fp: str):
+                async with sem:
+                    if task and task.cancelled:
+                        return
 
-                if task:
-                    elapsed = time.time() - dir_start
-                    spd = uploaded_bytes / elapsed if elapsed > 0 else 0
-                    eta = (total_bytes - uploaded_bytes) / spd if spd > 0 else 0
-                    task.ul.update({
-                        "filename": cn, "uploaded": uploaded_bytes, "total": total_bytes,
-                        "speed": spd, "elapsed": elapsed, "eta": eta,
-                        "file_index": idx, "total_files": n,
-                    })
-                    await push_dashboard_update(user_id)
+                    smart  = smart_episode_name(fp, file_path)
+                    new_fp = os.path.join(os.path.dirname(fp), smart)
+                    if fp != new_fp and not os.path.exists(new_fp):
+                        os.rename(fp, new_fp); fp = new_fp
 
-                sent_msg = None
-                if as_video and fp.lower().endswith(video_exts):
-                    sent_msg = await message.reply_video(video=fp, caption=cap, disable_notification=True)
-                else:
-                    sent_msg = await message.reply_document(document=fp, caption=cap, disable_notification=True)
+                    file_sz = os.path.getsize(fp)
+                    cn      = os.path.basename(fp)
+                    cap     = f"📄 {cn} [{idx}/{n}]"
 
-                if sent_msg and dump_channel:
-                    try:
-                        await sent_msg.copy(dump_channel)
-                    except Exception as e:
-                        print(f"Failed to copy file {idx} to dump channel: {e}")
+                    # Per-file progress feeding into shared dir-level dashboard
+                    _f_lr = [0.0]
+                    async def _f_progress(current, total, _cn=cn, _idx=idx, _file_sz=file_sz):
+                        now = time.time()
+                        if now - _f_lr[0] < MIN_EDIT_GAP: return
+                        _f_lr[0] = now
+                        if task:
+                            async with _ul_lock:
+                                elapsed = now - dir_start
+                                approx  = _uploaded_bytes[0] + current
+                                spd     = approx / elapsed if elapsed > 0 else 0
+                                eta     = (total_bytes - approx) / spd if spd > 0 else 0
+                                task.ul.update({
+                                    "filename": _cn, "uploaded": approx,
+                                    "total": total_bytes, "speed": spd,
+                                    "elapsed": elapsed, "eta": eta,
+                                    "file_index": _idx, "total_files": n,
+                                })
+                            await push_dashboard_update(user_id)
 
-                try: os.remove(fp)
-                except Exception as e: print(f"Cleanup error (file {idx}/{n}): {e}")
+                    sent_msg = None
+                    if as_video and fp.lower().endswith(video_exts):
+                        sent_msg = await message.reply_video(video=fp, caption=cap, progress=_f_progress, disable_notification=True)
+                    else:
+                        sent_msg = await message.reply_document(document=fp, caption=cap, progress=_f_progress, disable_notification=True)
 
-                uploaded_bytes += file_sz
+                    if sent_msg and dump_channel:
+                        try:
+                            await sent_msg.copy(dump_channel)
+                        except Exception as e:
+                            print(f"Failed to copy file {idx} to dump channel: {e}")
+
+                    try: os.remove(fp)
+                    except Exception as e: print(f"Cleanup error (file {idx}/{n}): {e}")
+
+                    async with _ul_lock:
+                        _uploaded_bytes[0] += file_sz
+
+            await asyncio.gather(*[_upload_one(idx, fp) for idx, fp in enumerate(files, 1)])
 
             try: shutil.rmtree(file_path, ignore_errors=True)
             except Exception as e: print(f"Cleanup error (dir): {e}")
