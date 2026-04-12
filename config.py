@@ -57,7 +57,7 @@ MAX_CONCURRENT_TRANSMISSIONS = int(os.environ.get("MAX_CONCURRENT_TRANSMISSIONS"
 #  Upload Speed Tuning
 # ─────────────────────────────────────────────────────────────────────────────
 # Max files uploaded in parallel when uploading a directory
-UPLOAD_PARALLEL_FILES = int(os.environ.get("UPLOAD_PARALLEL_FILES", "8"))
+UPLOAD_PARALLEL_FILES = int(os.environ.get("UPLOAD_PARALLEL_FILES", "2"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Trackers — 38 trackers across 3 tiers
