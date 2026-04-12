@@ -325,7 +325,7 @@ def dashboard_keyboard(user_id: int, page: int = 0, total_pages: int = 1) -> Inl
             callback_data=f"dpage:{user_id}:{min(total_pages - 1, page + 1)}"
         ))
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"dash:{user_id}")])
+    buttons.append([InlineKeyboardButton("♻ Refresh", callback_data=f"dash:{user_id}")])
     return InlineKeyboardMarkup(buttons)
 
 
