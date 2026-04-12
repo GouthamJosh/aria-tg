@@ -44,7 +44,7 @@ ENGINE_EXTRACT = "py7zr / zipfile"
 # ─────────────────────────────────────────────────────────────────────────────
 #  Dashboard / FloodWait Settings
 # ─────────────────────────────────────────────────────────────────────────────
-DASHBOARD_REFRESH_INTERVAL = int(os.environ.get("DASHBOARD_REFRESH_INTERVAL", "6"))
+DASHBOARD_REFRESH_INTERVAL = int(os.environ.get("DASHBOARD_REFRESH_INTERVAL", "5"))
 MIN_EDIT_GAP               = int(os.environ.get("MIN_EDIT_GAP", "5"))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,7 +57,7 @@ MAX_CONCURRENT_TRANSMISSIONS = int(os.environ.get("MAX_CONCURRENT_TRANSMISSIONS"
 #  Upload Speed Tuning
 # ─────────────────────────────────────────────────────────────────────────────
 # Max files uploaded in parallel when uploading a directory
-UPLOAD_PARALLEL_FILES = int(os.environ.get("UPLOAD_PARALLEL_FILES", "4"))
+UPLOAD_PARALLEL_FILES = int(os.environ.get("UPLOAD_PARALLEL_FILES", "8"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Trackers — 38 trackers across 3 tiers
