@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
 
-import yt_dlp
 import re
 import time
 import asyncio
@@ -62,7 +61,6 @@ active_downloads  = {}
 user_settings     = {}
 user_dashboards   = {}
 user_edit_queues  = {}
-ytdl_session      = {}
 _dashboard_locks  = {}   # per-user asyncio.Lock to prevent duplicate dashboard creation
 
 class DownloadTask:
@@ -128,9 +126,11 @@ def smart_episode_name(file_path: str, base_dir: str) -> str:
     return result
 
 def create_progress_bar(pct: float) -> str:
-    if pct >= 100: return "[" + chr(11042)*12 + "] 100%"
+    if pct >= 100: return "`[████████████]` **100%**"
     f = int(pct / 100 * 12)
-    return f"[{chr(11042)*f}{chr(11041)*(12-f)}] {pct:.1f}%"
+    e = 12 - f
+    bar = "█" * f + "░" * e
+    return f"`[{bar}]` **{pct:.1f}%**"
 
 def format_speed(s: float) -> str:
     if s >= 1048576: return f"{s/1048576:.2f} MB/s"
@@ -171,11 +171,11 @@ def get_system_stats() -> dict:
 
 def bot_stats_block(st: dict, task_count: int = 0) -> str:
     return (
-        f"⌬ **Bot Stats**\n"
-        f"┠ **Tasks:** {task_count}\n"
-        f"┠ **CPU:** {st['cpu']:.1f}% | **F:** {st['disk_free']:.2f}GB [{st['disk_free_pct']:.1f}%]\n"
-        f"┠ **RAM:** {st['ram_percent']:.1f}% | **UPTIME:** {st['uptime']}\n"
-        f"┖ **DL:** {format_speed(st['dl_speed'])} | **UL:** {format_speed(st['ul_speed'])}"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⌬ **Bot Stats** — Active: `{task_count}` task(s)\n"
+        f"┠ 🖥 **CPU:** {st['cpu']:.1f}%  💾 **RAM:** {st['ram_percent']:.1f}%\n"
+        f"┠ 💿 **Free:** {st['disk_free']:.2f} GB [{st['disk_free_pct']:.1f}%]  🕐 **Up:** {st['uptime']}\n"
+        f"┖ ⬇ **{format_speed(st['dl_speed'])}**  ⬆ **{format_speed(st['ul_speed'])}**"
     )
 
 def get_user_label(message: Message) -> str:
@@ -201,71 +201,66 @@ def build_task_block(task: DownloadTask, index: int) -> str:
     p  = task.current_phase
 
     if p == "dl":
-        d  = task.dl
-        sz = ("Fetching Metadata/Peers..." if d["total"] == 0
-              else f"{format_size(d['downloaded'])} of {format_size(d['total'])}")
-        tl = f"Elapsed: {format_time(d['elapsed'])} | ETA: {format_time(d['eta'])}"
-        return (f"**{index}. {d['filename'] or 'Connecting...'}**\n"
-                f"├ {create_progress_bar(d['progress'])}\n"
-                f"├ **Processed** → {sz}\n"
-                f"├ **Status** → Download\n"
-                f"├ **Speed** → {format_speed(d['speed'])}\n"
-                f"├ **Time** → {tl}\n"
-                f"{d['peer_line']}"
-                f"├ **Engine** → {ENGINE_DL} | **Mode** → #ARIA2 → #Leech\n"
-                f"└ **Stop** → /stop_{gs}")
+        d    = task.dl
+        name = d["filename"] or "Connecting..."
+        sz   = ("🔍 Fetching Metadata..." if d["total"] == 0
+                else f"{format_size(d['downloaded'])} / **{format_size(d['total'])}**")
+        peer = d["peer_line"].strip() if d["peer_line"] else ""
+        peer_line = f"\n├ 🔗 {peer}" if peer else ""
+        return (
+            f"**{index}. ⬇️  {name}**\n"
+            f"├ {create_progress_bar(d['progress'])}\n"
+            f"├ 📦 {sz}\n"
+            f"├ ⚡ **{format_speed(d['speed'])}**  •  ⏳ ETA: `{format_time(d['eta'])}`"
+            f"{peer_line}\n"
+            f"├ 🕐 Elapsed: `{format_time(d['elapsed'])}`\n"
+            f"├ 🔧 `{ENGINE_DL}` → `#Leech`\n"
+            f"└ ⛔ /stop_{gs}"
+        )
 
     if p == "ext":
         e   = task.ext
         pct = e["pct"]
         if e["total"] > 0:
-            sz = f"{format_size(e['extracted'])} of {format_size(e['total'])}"
+            sz = f"{format_size(e['extracted'])} / **{format_size(e['total'])}**"
         elif e["archive_size"] > 0:
-            sz = f"Archive: {format_size(e['archive_size'])}"
+            sz = f"Archive: **{format_size(e['archive_size'])}**"
         else:
             sz = "Preparing..."
-        tl  = f"Elapsed: {format_time(e['elapsed'])} | ETA: {format_time(e['remaining'])}"
-        ft  = f"📄 {e['file_index']} / {e['total_files']} files" if e["total_files"] > 0 else "Scanning archive..."
+        ft  = f"`{e['file_index']} / {e['total_files']} files`" if e["total_files"] > 0 else "`Scanning...`"
         cur = e["cur_file"]
         if cur and len(cur) > 45: cur = cur[:42] + "..."
         fl  = f"`{cur}`" if cur else "`preparing...`"
-        sp  = format_speed(e["speed"]) if e["speed"] > 0 else "Calculating..."
-        return (f"**{index}. 📦 {e['filename'] or 'Extracting...'}**\n"
-                f"├ {create_progress_bar(pct)}\n"
-                f"├ **Extracted** → {sz}\n"
-                f"├ **Files** → {ft}\n"
-                f"├ **Status** → Extracting\n"
-                f"├ **Speed** → {sp}\n"
-                f"├ **Time** → {tl}\n"
-                f"├ **Current** → {fl}\n"
-                f"├ **Engine** → {ENGINE_EXTRACT} | **Mode** → #Extract → #Leech\n"
-                f"└ **Stop** → /stop_{gs}")
+        sp  = f"**{format_speed(e['speed'])}**" if e["speed"] > 0 else "`Calculating...`"
+        return (
+            f"**{index}. 📦  {e['filename'] or 'Extracting...'}**\n"
+            f"├ {create_progress_bar(pct)}\n"
+            f"├ 🗜 {sz}\n"
+            f"├ 📄 {ft}  •  ⚡ {sp}\n"
+            f"├ 📂 Current: {fl}\n"
+            f"├ 🕐 Elapsed: `{format_time(e['elapsed'])}`  •  ⏳ `{format_time(e['remaining'])}`\n"
+            f"├ 🔧 `{ENGINE_EXTRACT}` → `#Extract` → `#Leech`\n"
+            f"└ ⛔ /stop_{gs}"
+        )
 
     if p == "ul":
-        u   = task.ul
-        pc  = min((u["uploaded"] / u["total"]) * 100, 100) if u["total"] > 0 else 0
-        tl  = f"Elapsed: {format_time(u['elapsed'])} | ETA: {format_time(u['eta'])}"
-        fc_badge = f"📄 {u['file_index']} / {u['total_files']} files" if u["total_files"] > 1 else None
+        u    = task.ul
+        pc   = min((u["uploaded"] / u["total"]) * 100, 100) if u["total"] > 0 else 0
         fname = clean_filename(u["filename"] or "Uploading...")
-        lines = [
-            f"**{index}. ⬆️ {fname}**\n",
-            f"├ {create_progress_bar(pc)}\n",
-            f"├ **Uploaded** → {format_size(u['uploaded'])} of {format_size(u['total'])}\n",
-        ]
-        if fc_badge:
-            lines.append(f"├ **Files** → {fc_badge}\n")
-        lines += [
-            f"├ **Status** → Upload\n",
-            f"├ **Speed** → {format_speed(u['speed'])}\n",
-            f"├ **Time** → {tl}\n",
-            f"├ **Engine** → {ENGINE_UL}\n",
-            f"├ **In Mode** → #Aria2\n",
-            f"├ **Out Mode** → #Leech\n",
-            f"└ **Stop** → /stop_{gs}",
-        ]
-        return "".join(lines)
+        sz   = f"{format_size(u['uploaded'])} / **{format_size(u['total'])}**"
+        fc_line = f"\n├ 📄 Files: `{u['file_index']} / {u['total_files']}`" if u["total_files"] > 1 else ""
+        return (
+            f"**{index}. ⬆️  {fname}**\n"
+            f"├ {create_progress_bar(pc)}\n"
+            f"├ 📤 {sz}\n"
+            f"├ ⚡ **{format_speed(u['speed'])}**  •  ⏳ ETA: `{format_time(u['eta'])}`"
+            f"{fc_line}\n"
+            f"├ 🕐 Elapsed: `{format_time(u['elapsed'])}`\n"
+            f"├ 🔧 `{ENGINE_UL}` → `#Leech`\n"
+            f"└ ⛔ /stop_{gs}"
+        )
 
-    return f"**{index}. Task** → Processing..."
+    return f"**{index}. ⏳ Task** — Processing..."
 
 
 # ── Paginated dashboard builder ───────────────────────────────────────────────
@@ -278,7 +273,11 @@ def get_total_pages(user_id: int) -> int:
 def build_dashboard_text(user_id: int, user_label: str, page: int = 0) -> str:
     tasks = [t for t in active_downloads.values() if t.user_id == user_id]
     if not tasks:
-        return "✅ **All tasks completed!**"
+        return (
+            "🔰 **LEECH DASHBOARD**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ **All tasks completed!**"
+        )
 
     total_pages = max(1, (len(tasks) + TASKS_PER_PAGE - 1) // TASKS_PER_PAGE)
     page        = max(0, min(page, total_pages - 1))
@@ -287,23 +286,32 @@ def build_dashboard_text(user_id: int, user_label: str, page: int = 0) -> str:
     page_tasks = tasks[start: start + TASKS_PER_PAGE]
 
     stats  = get_system_stats()
+    # Realtime speed: always sum from ALL active tasks regardless of page
     stats["dl_speed"] = sum(t.dl["speed"] for t in tasks if t.current_phase == "dl")
     stats["ul_speed"] = sum(t.ul["speed"] for t in tasks if t.current_phase == "ul")
+
+    dl_c = sum(1 for t in tasks if t.current_phase == "dl")
+    ex_c = sum(1 for t in tasks if t.current_phase == "ext")
+    ul_c = sum(1 for t in tasks if t.current_phase == "ul")
+    badges = []
+    if dl_c: badges.append(f"⬇ `{dl_c}`")
+    if ex_c: badges.append(f"📦 `{ex_c}`")
+    if ul_c: badges.append(f"⬆ `{ul_c}`")
+    badge_str = "  ".join(badges)
+
+    page_label = f"  •  📄 `{page + 1}/{total_pages}`" if total_pages > 1 else ""
+    header = (
+        f"🔰 **LEECH DASHBOARD**\n"
+        f"👤 {user_label}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{badge_str}{page_label}\n"
+    )
 
     div    = "\n\n"
     blocks = [build_task_block(t, start + i) for i, t in enumerate(page_tasks, 1)]
     body   = div.join(blocks)
 
-    dl_c = sum(1 for t in tasks if t.current_phase == "dl")
-    ex_c = sum(1 for t in tasks if t.current_phase == "ext")
-    ul_c = sum(1 for t in tasks if t.current_phase == "ul")
-    parts = []
-    if dl_c: parts.append(f"⬇️ {dl_c} downloading")
-    if ex_c: parts.append(f"📦 {ex_c} extracting")
-    if ul_c: parts.append(f"⬆️ {ul_c} uploading")
-
-    page_label = f"  •  Page {page + 1} / {total_pages}" if total_pages > 1 else ""
-    return (f"**Task By** {user_label} — {' | '.join(parts)}{page_label}\n\n"
+    return (f"{header}\n"
             f"{body}\n\n"
             f"{bot_stats_block(stats, len(tasks))}")
 
@@ -313,7 +321,7 @@ def dashboard_keyboard(user_id: int, page: int = 0, total_pages: int = 1) -> Inl
     if total_pages > 1:
         nav = []
         nav.append(InlineKeyboardButton(
-            "◀ Prev" if page > 0 else "◀",
+            "◀️ Prev" if page > 0 else "◀️",
             callback_data=f"dpage:{user_id}:{max(0, page - 1)}"
         ))
         nav.append(InlineKeyboardButton(
@@ -321,11 +329,11 @@ def dashboard_keyboard(user_id: int, page: int = 0, total_pages: int = 1) -> Inl
             callback_data="noop"
         ))
         nav.append(InlineKeyboardButton(
-            "Next ▶" if page < total_pages - 1 else "▶",
+            "Next ▶️" if page < total_pages - 1 else "▶️",
             callback_data=f"dpage:{user_id}:{min(total_pages - 1, page + 1)}"
         ))
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton("♻ Refresh", callback_data=f"dash:{user_id}")])
+    buttons.append([InlineKeyboardButton("🔄 Refresh Now", callback_data=f"dash:{user_id}")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -401,7 +409,12 @@ async def dashboard_loop(user_id: int):
                 try: q.put_nowait(None)
                 except Exception: pass
             try:
-                await dash["msg"].edit_text("✅ **All tasks completed!**", reply_markup=None)
+                await dash["msg"].edit_text(
+                    "🔰 **LEECH DASHBOARD**\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "✅ **All tasks completed!**",
+                    reply_markup=None
+                )
             except Exception: pass
             user_dashboards.pop(user_id, None)
             _dashboard_locks.pop(user_id, None)
@@ -414,7 +427,7 @@ async def dashboard_loop(user_id: int):
         if now - dash.get("last_edit_at", 0) < MIN_EDIT_GAP: continue
         await _enqueue_edit(user_id)
 
-async def get_or_create_dashboard(user_id: int, trigger_msg: Message, user_label: str) -> Message:
+async def get_or_create_dashboard(user_id: int, trigger_msg: Message, user_label: str, force_new: bool = False) -> Message:
     # BUG FIX: When multiple torrents/links arrive simultaneously, concurrent calls
     # all see user_dashboards.get(user_id) == None before any one of them sets it,
     # so each creates its own "Initialising..." message. A per-user asyncio.Lock
@@ -423,11 +436,29 @@ async def get_or_create_dashboard(user_id: int, trigger_msg: Message, user_label
         _dashboard_locks[user_id] = asyncio.Lock()
     async with _dashboard_locks[user_id]:
         dash = user_dashboards.get(user_id)
+
+        # force_new=True: called on /l — delete the old dashboard and start fresh
+        if dash and force_new:
+            try:
+                await dash["msg"].delete()
+            except Exception:
+                pass
+            # Gracefully stop the old edit worker
+            old_q = user_edit_queues.pop(user_id, None)
+            if old_q:
+                try: old_q.put_nowait(None)
+                except Exception: pass
+            user_dashboards.pop(user_id, None)
+            _dashboard_locks.pop(user_id, None)
+            _dashboard_locks[user_id] = asyncio.Lock()
+            dash = None
+
         if dash:
             dash["user_label"] = user_label
             return dash["msg"]
+
         msg = await trigger_msg.reply_text(
-            "⏳ **Initialising...**",
+            "⏳ **Initialising dashboard...**",
             reply_markup=dashboard_keyboard(user_id, 0, 1),
         )
         user_dashboards[user_id] = {
@@ -508,297 +539,6 @@ async def dashboard_page_callback(client, cq: CallbackQuery):
         await safe_answer(cq)
     except Exception as e:
         await safe_answer(cq, f"❌ {e}", show_alert=True)
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  YT-DLP — Unified Download (Video + proper MP3 via FFmpeg)
-# ══════════════════════════════════════════════════════════════════════
-
-def _get_local_cookie_path() -> str | None:
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-    return p if os.path.exists(p) else None
-
-# Base ydl_opts shared between info-fetch and download
-def _base_ydl_opts(cookie_path: str | None) -> dict:
-    # ios/android do NOT support cookies — use web clients when cookies exist,
-    # ios/android when they don't (they bypass n-challenge natively).
-    # skip_webpage removed — it breaks format discovery.
-    if cookie_path:
-        clients = ["web", "mweb"]
-    else:
-        clients = ["ios", "android"]
-
-    opts = {
-        "quiet":              True,
-        "nocheckcertificate": True,
-        "noplaylist":         True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": clients,
-            }
-        },
-    }
-    if cookie_path:
-        opts["cookiefile"] = cookie_path
-    return opts
-
-
-async def download_ytdl(url: str, task: DownloadTask, format_id: str, is_audio: bool = False) -> str:
-    loop = asyncio.get_running_loop()
-    last_push = [0.0]
-
-    def ytdl_progress(d):
-        if d["status"] != "downloading": return
-        total    = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
-        current  = d.get("downloaded_bytes", 0)
-        filename = os.path.basename(d.get("filename", "Video"))
-        speed    = d.get("speed") or 0
-        eta_s    = d.get("eta") or 0
-        progress = (current / total * 100) if total > 0 else 0
-        elapsed  = time.time() - task.start_time
-        task.dl.update({
-            "filename":   clean_filename(filename),
-            "progress":   progress,
-            "speed":      speed,
-            "downloaded": current,
-            "total":      total,
-            "elapsed":    elapsed,
-            "eta":        eta_s,
-            "peer_line":  "├ **Engine** → YT-DLP\n",
-        })
-        task.filename  = clean_filename(filename)
-        task.file_size = total
-        now = time.time()
-        if current > 0 and now - last_push[0] >= MIN_EDIT_GAP:
-            last_push[0] = now
-            asyncio.run_coroutine_threadsafe(push_dashboard_update(task.user_id), loop)
-
-    cookie_path = _get_local_cookie_path()
-    ydl_opts = {
-        **_base_ydl_opts(cookie_path),
-        "format":         format_id,
-        "outtmpl":        os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
-        "progress_hooks": [ytdl_progress],
-        "socket_timeout": 30,   # Instagram/TikTok drop connections faster than YouTube
-    }
-
-    # ── merge_output_format must ONLY be set when the format string requests
-    # separate video+audio tracks (contains "+"), e.g. "bestvideo+bestaudio".
-    # Setting it unconditionally causes FFmpegMergerPP to run on single-stream
-    # files (Instagram reels, TikTok, etc.) where there is nothing to merge.
-    # ffprobe then fails to find a separate audio codec and emits:
-    #   "WARNING: unable to obtain file audio codec with ffprobe"
-    # which can corrupt or produce a zero-byte output file.
-    if "+" in format_id:
-        ydl_opts["merge_output_format"] = "mp4"
-
-    # ── MP3: use FFmpegExtractAudio postprocessor for a proper conversion ──
-    if is_audio:
-        ydl_opts["format"]         = "bestaudio/best"
-        ydl_opts["postprocessors"] = [{
-            "key":              "FFmpegExtractAudio",
-            "preferredcodec":   "mp3",
-            "preferredquality": "320",
-        }]
-        ydl_opts.pop("merge_output_format", None)  # irrelevant for audio-only
-
-    def _run():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            return str(ydl.prepare_filename(info))
-
-    raw_path = await loop.run_in_executor(executor, _run)
-
-    # ── Extension fallback: ffmpeg may rename the output file ──
-    base, _ = os.path.splitext(raw_path)
-    search_exts = (".mp3",) if is_audio else (".mp4", ".mkv", ".webm", ".m4a", "")
-    for ext in search_exts:
-        candidate = base + ext
-        if os.path.exists(candidate):
-            return candidate
-    # BUG FIX: previously returned raw_path unconditionally here, but raw_path is
-    # the pre-postprocessing filename (e.g. .webm) which no longer exists after
-    # FFmpeg postprocessing. Raise a clear error instead of silently returning a
-    # path that will cause a file-not-found crash at upload time.
-    if os.path.exists(raw_path):
-        return raw_path
-    raise FileNotFoundError(
-        f"yt-dlp finished but output file not found. "
-        f"Expected one of: {[base + e for e in search_exts]}"
-    )
-
-
-async def process_ytdl_task(message: Message, task: DownloadTask, url: str,
-                             format_id: str, is_audio: bool = False):
-    try:
-        await push_dashboard_update(task.user_id)
-        file_path = await download_ytdl(url, task, format_id, is_audio=is_audio)
-        if task.cancelled:
-            cleanup_files(task); active_downloads.pop(task.gid, None)
-            await push_dashboard_update(task.user_id); return
-        task.file_path = file_path
-        await upload_to_telegram(file_path, message, task=task)
-        cleanup_files(task); active_downloads.pop(task.gid, None)
-        await push_dashboard_update(task.user_id)
-    except Exception as e:
-        await message.reply_text(f"❌ **YT-DLP Error:** `{str(e)}`")
-        cleanup_files(task); active_downloads.pop(task.gid, None)
-        await push_dashboard_update(task.user_id)
-
-
-# ── /yl  /ytleech — Unified command with quality picker ──────────────────────
-@app.on_message(filters.command(["yl", "ytleech"]))
-async def ytleech_command(client, m: Message):
-    if len(m.command) < 2:
-        return await m.reply_text(
-            "❌ **Usage:** `/yl <URL>`\n"
-            "Example: `/yl https://youtu.be/xxxxx`"
-        )
-
-    url = m.text.split(None, 1)[1].strip()
-    msg = await m.reply_text("🔍 **Fetching available formats...**")
-
-    try:
-        loop        = asyncio.get_running_loop()
-        cookie_path = _get_local_cookie_path()
-
-        def _fetch_info():
-            opts = {
-                **_base_ydl_opts(cookie_path),
-                "skip_download": True,
-                "socket_timeout": 30,   # don't hang forever on bad URLs
-            }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=False)
-
-        info    = await loop.run_in_executor(executor, _fetch_info)
-        formats = info.get("formats", [])
-        title   = info.get("title", "Video")[:50]
-
-        # ── Collect available resolutions ──────────────────────────────────
-        # Prefer progressive (video+audio in one) streams first, then adaptive
-        seen_heights = set()
-        res_buttons  = []
-
-        # Pass 1: progressive streams (vcodec + acodec both set, not "none")
-        for f in sorted(formats, key=lambda x: x.get("height") or 0, reverse=True):
-            h = f.get("height")
-            if not h or h in seen_heights: continue
-            vc = f.get("vcodec", "none")
-            ac = f.get("acodec", "none")
-            if vc != "none" and ac != "none":
-                seen_heights.add(h)
-                res_buttons.append((h, "progressive"))
-
-        # Pass 2: adaptive heights not already covered
-        for f in sorted(formats, key=lambda x: x.get("height") or 0, reverse=True):
-            h = f.get("height")
-            if not h or h in seen_heights: continue
-            if f.get("vcodec", "none") != "none":
-                seen_heights.add(h)
-                res_buttons.append((h, "adaptive"))
-
-        if not res_buttons:
-            # Fallback: offer fixed standard resolutions
-            res_buttons = [(1080, "adaptive"), (720, "adaptive"),
-                           (480, "adaptive"), (360, "adaptive")]
-
-        # ── Build keyboard ────────────────────────────────────────────────
-        buttons = []
-        row     = []
-        for h, kind in res_buttons:
-            label     = f"🎬 {h}p"
-            cb_data   = f"yl_vid|{h}|{kind}|{m.id}"
-            row.append(InlineKeyboardButton(label, callback_data=cb_data))
-            if len(row) == 3:           # 3 resolution buttons per row
-                buttons.append(row); row = []
-        if row:
-            buttons.append(row)
-
-        # Audio row
-        buttons.append([
-            InlineKeyboardButton("🎵 MP3 (320kbps)", callback_data=f"yl_aud|mp3|{m.id}"),
-        ])
-        buttons.append([InlineKeyboardButton("✖️ Cancel", callback_data="close_help")])
-
-        session_key = f"{m.from_user.id}_{m.id}"
-        ytdl_session[session_key] = {"url": url, "user_id": m.from_user.id, "message": m}
-
-        # Auto-expire session after 5 minutes if user never picks a quality
-        async def _expire_session():
-            await asyncio.sleep(300)
-            ytdl_session.pop(session_key, None)
-        asyncio.create_task(_expire_session())
-
-        await msg.edit_text(
-            f"🎬 **{title}**\n\nSelect quality:",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-
-    except Exception as e:
-        await msg.edit_text(f"❌ **Error fetching formats:**\n`{str(e)}`")
-
-
-# ── Callback: quality selection ───────────────────────────────────────────────
-@app.on_callback_query(filters.regex(r"^yl_"))
-async def ytleech_quality_callback(client, cq: CallbackQuery):
-    parts  = cq.data.split("|")
-    mode   = parts[0]           # yl_vid  or  yl_aud
-    msg_id = int(parts[-1])
-
-    # Use composite key: user_id + msg_id to avoid collision across users
-    session_key = f"{cq.from_user.id}_{msg_id}"
-    session = ytdl_session.get(session_key)
-    if not session:
-        await safe_answer(cq, "❌ Session expired. Please send the link again.", show_alert=True)
-        return
-    await safe_answer(cq)
-
-    is_audio = (mode == "yl_aud")
-
-    if is_audio:
-        # Audio: yt-dlp + FFmpegExtractAudio handles conversion
-        f_id  = "bestaudio/best"
-        label = "🎵 MP3 (320kbps)"
-    else:
-        height = parts[1]     # e.g. "1080"
-        kind   = parts[2]     # "progressive" or "adaptive"
-        label  = f"🎬 {height}p"
-
-        if kind == "progressive":
-            # Single-file stream — already has audio, no merge needed
-            f_id = (
-                f"best[height<={height}][vcodec!=none][acodec!=none]"
-                f"/best[height<={height}]"
-                f"/best"
-            )
-        else:
-            # Adaptive: separate video+audio tracks merged by ffmpeg → mp4
-            # Flexible fallback — does not require m4a/mp4 specifically
-            f_id = (
-                f"bestvideo[height<={height}]+bestaudio"
-                f"/best[height<={height}]"
-                f"/best"
-            )
-
-    orig_msg   = session["message"]
-    user_id    = session["user_id"]
-    user_label = get_user_label(orig_msg)
-
-    await cq.message.edit_text(f"⏳ **Starting download:** {label}...")
-
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    await get_or_create_dashboard(user_id, orig_msg, user_label)
-
-    pseudo_gid = f"ytdl_{msg_id}_{int(time.time())}"
-    task = DownloadTask(pseudo_gid, user_id)
-    task.dl["peer_line"] = "├ **Engine** → YT-DLP\n"
-    active_downloads[pseudo_gid] = task
-
-    asyncio.create_task(
-        process_ytdl_task(orig_msg, task, session["url"], f_id, is_audio=is_audio)
-    )
-    ytdl_session.pop(session_key, None)
 
 
 # ── Callback: no-op ───────────────────────────────────────────────────────────
@@ -1231,10 +971,15 @@ async def set_dump_channel(client, message: Message):
 
 @app.on_message(filters.command(["leech", "l", "ql"]))
 async def universal_leech_command(client, message: Message):
-    extract = "-e" in message.text.lower()
-    user_id = message.from_user.id; user_label = get_user_label(message)
+    extract    = "-e" in message.text.lower()
+    user_id    = message.from_user.id
+    user_label = get_user_label(message)
+    cmd        = message.command[0].lower()   # "l", "leech", or "ql"
+    # /l and /leech → fresh dashboard per new task (delete old, start clean)
+    # /ql            → append to existing dashboard (batch mode)
+    force_new  = cmd in ("l", "leech")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    await get_or_create_dashboard(user_id, message, user_label)
+    await get_or_create_dashboard(user_id, message, user_label, force_new=force_new)
 
     if message.reply_to_message and message.reply_to_message.document:
         doc = message.reply_to_message.document
@@ -1263,30 +1008,6 @@ async def universal_leech_command(client, message: Message):
 @app.on_message(filters.document)
 async def handle_document_upload(client, message: Message):
     file_name = message.document.file_name or ""
-
-    if file_name == "cookies.txt":
-        if message.from_user.id != OWNER_ID:
-            return await message.reply_text("❌ **Access Denied:** Only the bot owner can upload cookies.")
-        msg = await message.reply_text("⏳ Processing `cookies.txt`...")
-        file_path = await message.download()
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                cookie_data = f.read()
-            await settings_col.update_one(
-                {"_id": "ytdl_cookies"},
-                {"$set": {"content": cookie_data}},
-                upsert=True
-            )
-            local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-            with open(local_cookie_path, "w", encoding="utf-8") as f:
-                f.write(cookie_data)
-            await msg.edit_text("✅ **`cookies.txt` successfully saved to Database and synced to Local!**")
-        except Exception as e:
-            await msg.edit_text(f"❌ **Error saving cookies:** `{str(e)}`")
-        finally:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        return
 
     if file_name.endswith(".torrent"):
         try:
@@ -1319,9 +1040,8 @@ async def stop_command(client, message: Message):
             await message.reply_text(f"❌ **Task `{gid_short}` not found!**"); return
         found_task.cancelled = True
         try:
-            if not found_task.gid.startswith("ytdl_"):
-                _dl_stop = await aria2_run(aria2.get_download, found_task.gid)
-                await aria2_run(aria2.remove, [_dl_stop], force=True, files=True)
+            _dl_stop = await aria2_run(aria2.get_download, found_task.gid)
+            await aria2_run(aria2.remove, [_dl_stop], force=True, files=True)
             cleanup_files(found_task)
         except Exception as e: print(f"Stop error: {e}")
         active_downloads.pop(found_gid, None); active_downloads.pop(found_task.gid, None)
@@ -1349,31 +1069,25 @@ async def help_command(client, message: Message):
     await message.reply_text(
         "**📖 Leech Bot — Help & Commands**\n\n"
         "**📥 Download Commands:**\n"
-        "• `/yl <URL>` or `/ytleech <URL>` — YouTube/media download with quality picker\n"
         "• `/ql <link1> <link2>` — Download multiple direct/magnet links at once\n"
-        "• `/leech <link>` — Standard direct link download\n"
-        "• `/leech <link> -e` — Download & auto-extract archive\n"
+        "• `/l <link>` — Single direct link download\n"
+        "• `/l <link> -e` — Download & auto-extract archive\n"
         "• **Upload a `.torrent` file** directly to start\n\n"
         "**⚙️ Control:**\n"
-        "• `/settings` — Toggle Document / Video upload mode & Manage Cookies\n"
+        "• `/settings` — Toggle Document / Video upload mode\n"
         "• `/stop <task_id>` — Cancel an active task\n"
         "• `/setdump <channel_id> -on/-off` — Manage global dump channel (Owner Only)\n\n"
         "**✨ Features:**\n"
-        "✓ Quality picker: real resolutions fetched from YouTube\n"
-        "✓ MP3 at 320kbps via FFmpeg postprocessor\n"
-        "✓ Paginated dashboard — 4 tasks per page with ◀ Prev / Next ▶\n"
-        "✓ ONE dashboard message per user, auto-refreshes every 15s\n"
+        "✓ New paginated dashboard — 4 tasks per page with ◀ Prev / Next ▶\n"
+        "✓ ONE dashboard per user, auto-refreshes & shows realtime speed\n"
         "✓ FloodWait eliminated via serialised edit queue\n"
-        "✓ 20 supercharged trackers + 200 max peers\n"
-        "✓ Smart filename cleaning", reply_markup=kb)
+        "✓ 38 supercharged trackers + 500 max peers\n"
+        "✓ Smart filename cleaning\n"
+        "✓ /l resets dashboard on each new task", reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex(r"^close_help$"))
 async def close_help_callback(client, cq: CallbackQuery):
-    # Clean up any dangling ytdl session for this user+message
-    msg_id = cq.message.reply_to_message.id if cq.message.reply_to_message else None
-    if msg_id:
-        ytdl_session.pop(f"{cq.from_user.id}_{msg_id}", None)
     try: await cq.message.delete()
     except Exception: pass
 
@@ -1383,18 +1097,12 @@ async def settings_command(client, message: Message):
     uid = message.from_user.id
     av  = user_settings.get(uid, {}).get("as_video", False)
     mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
-    kb_buttons = [[InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]]
-    if uid == OWNER_ID:
-        cookie_doc  = await settings_col.find_one({"_id": "ytdl_cookies"})
-        has_cookies = bool(cookie_doc and cookie_doc.get("content"))
-        if has_cookies:
-            kb_buttons.append([InlineKeyboardButton("🗑 Delete Cookies.txt", callback_data="delete_cookies")])
-        else:
-            kb_buttons.append([InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")])
-    kb_buttons.append([InlineKeyboardButton("🗑 Close", callback_data="close_help")])
+    kb_buttons = [
+        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")],
+        [InlineKeyboardButton("🗑 Close", callback_data="close_help")],
+    ]
     await message.reply_text(
-        "⚙️ **Upload Settings**\n\nChoose how video files (.mp4, .mkv, .webm) are sent.\n"
-        "*(Admins can also manage YT-DLP cookies here)*",
+        "⚙️ **Upload Settings**\n\nChoose how video files (.mp4, .mkv, .webm) are sent.",
         reply_markup=InlineKeyboardMarkup(kb_buttons)
     )
 
@@ -1414,36 +1122,12 @@ async def toggle_mode_callback(client, cq: CallbackQuery):
         upsert=True
     )
     mt = "🎬 Video (Playable)" if new_val else "📄 Document (File)"
-    kb_buttons = [[InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")]]
-    if uid == OWNER_ID:
-        cookie_doc = await settings_col.find_one({"_id": "ytdl_cookies"})
-        if cookie_doc and cookie_doc.get("content"):
-            kb_buttons.append([InlineKeyboardButton("🗑 Delete Cookies.txt", callback_data="delete_cookies")])
-        else:
-            kb_buttons.append([InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")])
-    kb_buttons.append([InlineKeyboardButton("🗑 Close", callback_data="close_help")])
+    kb_buttons = [
+        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")],
+        [InlineKeyboardButton("🗑 Close", callback_data="close_help")],
+    ]
     await cq.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_buttons))
     await safe_answer(cq, f"✅ Switched to {mt}!")
-
-
-@app.on_callback_query(filters.regex(r"^delete_cookies$"))
-async def delete_cookies_callback(client, cq: CallbackQuery):
-    if cq.from_user.id != OWNER_ID:
-        return await safe_answer(cq, "❌ Access Denied!", show_alert=True)
-    await settings_col.delete_one({"_id": "ytdl_cookies"})
-    local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-    if os.path.exists(local_cookie_path):
-        try: os.remove(local_cookie_path)
-        except: pass
-    await safe_answer(cq, "✅ Cookies deleted successfully!", show_alert=True)
-    av = user_settings.get(OWNER_ID, {}).get("as_video", False)
-    mt = "🎬 Video (Playable)" if av else "📄 Document (File)"
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{OWNER_ID}")],
-        [InlineKeyboardButton("❌ No Cookies Uploaded", callback_data="noop")],
-        [InlineKeyboardButton("🗑 Close", callback_data="close_help")]
-    ])
-    await cq.edit_message_reply_markup(reply_markup=kb)
 
 
 # ── Keep-alive web server ─────────────────────────────────────────────────────
@@ -1473,17 +1157,6 @@ async def main():
     print(f"⏱️  Min edit gap   : {MIN_EDIT_GAP}s")
     print(f"📄 Tasks per page  : {TASKS_PER_PAGE}")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-    local_cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-    cookie_doc = await settings_col.find_one({"_id": "ytdl_cookies"})
-    if cookie_doc and cookie_doc.get("content"):
-        with open(local_cookie_path, "w", encoding="utf-8") as f:
-            f.write(cookie_doc["content"])
-        print("✅ Cookies synced from Database.")
-    else:
-        if os.path.exists(local_cookie_path):
-            os.remove(local_cookie_path)
-            print("🗑 Cleared stale local cookies.")
 
     await app.start()
 
