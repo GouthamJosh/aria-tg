@@ -1,5 +1,5 @@
-pyrotgfork
-TgCrypto
+pyrofork
+tgcrypto
 aria2p
 aiohttp
 aiofiles
@@ -8,5 +8,6 @@ psutil
 uvloop
 motor
 curl-cffi>=0.7.0
-yt_dlp
+yt-dlp
+requests
 python-dotenv
