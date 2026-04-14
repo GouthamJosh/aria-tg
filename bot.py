@@ -4,9 +4,16 @@ load_dotenv()  # Load environment variables from .env file
 
 import re
 import time
+import math
+import uuid
 import asyncio
+import logging
 import aria2p
+import requests
+import yt_dlp
 from aiohttp import web
+from contextlib import suppress
+from datetime import datetime
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait, MessageNotModified, QueryIdInvalid
@@ -1059,7 +1066,7 @@ async def start_command(client, message: Message):
     ])
     await message.reply_text(
         "**🤖 Welcome to the Advanced Leech Bot!**\n\n"
-        "Download direct links, magnets, and `.torrent` files and upload them to Telegram.\n\n"
+        "Download direct links, magnets, `.torrent` files and YouTube videos to Telegram.\n\n"
         "Type /help for all commands.\n\n© Maintained By @im_goutham_josh", reply_markup=kb)
 
 
@@ -1069,6 +1076,7 @@ async def help_command(client, message: Message):
     await message.reply_text(
         "**📖 Leech Bot — Help & Commands**\n\n"
         "**📥 Download Commands:**\n"
+        "• `/yl <url>` — Download YouTube/Instagram/TikTok & more\n"
         "• `/ql <link1> <link2>` — Download multiple direct/magnet links at once\n"
         "• `/l <link>` — Single direct link download\n"
         "• `/l <link> -e` — Download & auto-extract archive\n"
@@ -1178,6 +1186,724 @@ async def main():
     print("🤖 Bot ready — listening for commands...")
     await idle()
     await app.stop()
+
+
+
+# ════════════════════════════════════════════════════════
+#  YOUTUBE DOWNLOADER  (/yl command — powered by yt-dlp)
+# ════════════════════════════════════════════════════════
+
+# ── YT Config ────────────────────────────────────────────────────────────────
+YT_PROXY_URL   = os.environ.get("YT_PROXY_URL", "http://dLAG1sTQ6:qKE6euVsA@138.249.190.195:62694")       # Optional: set in .env
+YT_AUTH_USERS  = []                                         # Empty = all users allowed
+YT_MAX_PL      = 50                                         # Max playlist items
+YT_SESSION_TTL = 600                                        # Session expiry (seconds)
+
+_YT_BASE = os.path.dirname(os.path.abspath(__file__))
+YT_DL_DIR = os.path.join(DOWNLOAD_DIR, "yt_downloads")
+os.makedirs(YT_DL_DIR, exist_ok=True)
+
+YT_COOKIES = None
+for _p in [os.path.join(_YT_BASE, "cookies.txt"), os.path.expanduser("~/cookies.txt")]:
+    if os.path.exists(_p):
+        YT_COOKIES = _p
+        break
+
+yt_logger = logging.getLogger("YTLeech")
+
+# ── YT Session stores ─────────────────────────────────────────────────────────
+YT_URL_SESSIONS = {}   # uid → session data for single video quality picker
+YT_PL_SESSIONS  = {}   # uid → playlist session
+YT_WAITING_SEL  = {}   # user_id → pl_uid (waiting for selection text)
+
+def _yt_new_uid():
+    return uuid.uuid4().hex[:10]
+
+def _yt_cleanup():
+    now = time.time()
+    for d in [YT_URL_SESSIONS, YT_PL_SESSIONS]:
+        for k in list(d.keys()):
+            if now - d[k].get("created", 0) > YT_SESSION_TTL:
+                d.pop(k, None)
+
+# ── YT Helpers ────────────────────────────────────────────────────────────────
+def yt_humanbytes(size):
+    if not size: return "0 B"
+    for u in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024.0: return f"{size:.2f} {u}"
+        size /= 1024.0
+
+def yt_time_fmt(sec):
+    sec = int(sec or 0)
+    h, r = divmod(sec, 3600); m, s = divmod(r, 60)
+    if h: return f"{h}h {m}m {s}s"
+    if m: return f"{m}m {s}s"
+    return f"{s}s"
+
+def yt_pbar(pct, w=10):
+    f = math.floor(pct / (100 / w))
+    return f"[{'█'*f}{'░'*(w-f)}] {pct:.1f}%"
+
+def yt_is_auth(uid):
+    return not YT_AUTH_USERS or uid in YT_AUTH_USERS
+
+def yt_clean_url(url):
+    url = url.strip().rstrip("/")
+    url = re.sub(r"[?&]si=[^&]+", "", url)
+    url = re.sub(r"[?&]utm_[^&\s]+", "", url)
+    return url.rstrip("?&")
+
+def yt_extract_url(text):
+    m = re.search(r'((?:rtmps?|mms|rtsp|https?|ftp)://[^\s]+)', text)
+    return m.group(0) if m else None
+
+def yt_is_playlist(url):
+    if re.search(r"[?&]list=PL[a-zA-Z0-9_-]+", url): return True
+    if re.search(r"(playlist\?list=|/playlist/)", url, re.I): return True
+    return False
+
+async def _yt_safe_edit(msg, text):
+    with suppress(Exception):
+        await msg.edit_text(text)
+
+# ── YT Progress ───────────────────────────────────────────────────────────────
+class YtDlpProgress:
+    def __init__(self, msg, loop, prefix="", is_pl=False):
+        self.msg = msg; self.loop = loop; self.prefix = prefix; self.is_pl = is_pl
+        self._dl = 0; self._last = 0; self._speed = 0
+        self._eta = 0; self._size = 0; self._t = 0
+
+    def hook(self, d):
+        now = time.time()
+        if now - self._t < 4: return
+        self._t = now
+        if d["status"] == "finished":
+            if self.is_pl: self._last = 0
+            return
+        if d["status"] != "downloading": return
+        self._speed = d.get("speed") or 0
+        self._eta   = d.get("eta")   or 0
+        if self.is_pl:
+            chunk = (d.get("downloaded_bytes") or 0) - self._last
+            self._last = d.get("downloaded_bytes") or 0
+            self._dl  += chunk
+        else:
+            self._size = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            self._dl   = d.get("downloaded_bytes") or 0
+        try:
+            pct = (self._dl / self._size * 100) if self._size else 0
+        except ZeroDivisionError:
+            pct = 0
+        bar  = yt_pbar(pct)
+        text = (
+            f"{self.prefix}⬇️ **Downloading...**\n\n{bar}\n\n"
+            f"📦 `{yt_humanbytes(self._dl)}`" +
+            (f" / `{yt_humanbytes(self._size)}`" if self._size else "") +
+            f"\n⚡ Speed: `{yt_humanbytes(self._speed)}/s`" +
+            (f"\n⏳ ETA: `{yt_time_fmt(self._eta)}`" if self._eta else "")
+        )
+        asyncio.run_coroutine_threadsafe(_yt_safe_edit(self.msg, text), self.loop)
+
+async def yt_upload_progress(current, total, msg, start_time, label="Uploading"):
+    now = time.time(); diff = now - start_time
+    if round(diff % 5) != 0 and current != total: return
+    pct   = current * 100 / total if total else 0
+    speed = current / diff if diff > 0 else 0
+    eta   = (total - current) / speed if speed > 0 else 0
+    text  = (
+        f"📤 **{label}**\n\n{yt_pbar(pct)}\n\n"
+        f"📦 `{yt_humanbytes(current)}` / `{yt_humanbytes(total)}`\n"
+        f"⚡ Speed: `{yt_humanbytes(speed)}/s`\n"
+        f"⏳ ETA: `{yt_time_fmt(eta)}`"
+    )
+    await _yt_safe_edit(msg, text)
+
+# ── yt-dlp Options ────────────────────────────────────────────────────────────
+def _yt_base_opts():
+    o = {
+        "usenetrc": True,
+        "allow_multiple_video_streams": True,
+        "allow_multiple_audio_streams": True,
+        "noprogress": True,
+        "overwrites": True,
+        "writethumbnail": True,
+        "trim_file_name": 200,
+        "fragment_retries": 10,
+        "retries": 10,
+        "nocheckcertificate": True,
+        "retry_sleep_functions": {
+            "http": lambda n: 3, "fragment": lambda n: 3,
+            "file_access": lambda n: 3, "extractor": lambda n: 3,
+        },
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "extractor_args": {"youtube": {"player_client": ["web", "tv"], "skip": ["dash"]}},
+    }
+    if YT_COOKIES:   o["cookiefile"] = YT_COOKIES
+    if YT_PROXY_URL: o["proxy"]      = YT_PROXY_URL
+    return o
+
+def _yt_info_opts():
+    o = _yt_base_opts()
+    o.update({"quiet": True, "no_warnings": True, "playlist_items": "0", "format": "bv*+ba/b"})
+    return o
+
+def _yt_dl_opts(fmt, out_tmpl, tracker=None, is_pl=False):
+    o = _yt_base_opts()
+    o["outtmpl"] = {"default": out_tmpl, "thumbnail": out_tmpl.replace(".%(ext)s", "_t.%(ext)s")}
+    o["postprocessors"] = [{"add_chapters": True, "add_infojson": "if_exists",
+                             "add_metadata": True, "key": "FFmpegMetadata"}]
+    if tracker: o["progress_hooks"] = [tracker.hook]
+    if is_pl:   o["ignoreerrors"]   = True
+
+    is_audio = fmt.startswith("ba/b") or fmt in ("mp3",)
+    if is_audio:
+        parts = fmt.split("-") if "-" in fmt else ["ba/b", "mp3", "192"]
+        afmt  = parts[1] if len(parts) > 1 else "mp3"
+        arate = parts[2] if len(parts) > 2 else "192"
+        o["format"] = "ba/b"
+        o["postprocessors"].append({"key": "FFmpegExtractAudio",
+                                     "preferredcodec": afmt, "preferredquality": arate})
+    else:
+        o["format"] = fmt
+
+    o["postprocessors"].append({"format": "jpg", "key": "FFmpegThumbnailsConvertor", "when": "before_dl"})
+    ext = ".mp3" if is_audio else ".mp4"
+    if ext in [".mp3", ".mkv", ".mka", ".ogg", ".opus", ".flac", ".m4a", ".mp4", ".mov", ".m4v"]:
+        o["postprocessors"].append({"already_have_thumbnail": True, "key": "EmbedThumbnail"})
+    return o
+
+# ── Format Parser ─────────────────────────────────────────────────────────────
+def yt_parse_formats(result):
+    if "entries" in result:
+        fmts = {}
+        for h in ["144", "240", "360", "480", "720", "1080", "1440", "2160"]:
+            fmts[f"{h}|mp4"]  = f"bv*[height<=?{h}][ext=mp4]+ba[ext=m4a]/b[height<=?{h}]"
+            fmts[f"{h}|webm"] = f"bv*[height<=?{h}][ext=webm]+ba/b[height<=?{h}]"
+        return fmts, True
+
+    fmts = {}; is_m4a = False
+    for item in result.get("formats", []):
+        if not item.get("tbr"): continue
+        fid  = item["format_id"]
+        size = item.get("filesize") or item.get("filesize_approx") or 0
+        if item.get("video_ext") == "none" and (item.get("resolution") == "audio only" or item.get("acodec") != "none"):
+            if item.get("audio_ext") == "m4a": is_m4a = True
+            b_name = f"{item.get('acodec') or fid}-{item['ext']}"
+            v_fmt  = fid
+        elif item.get("height"):
+            h = item["height"]; ext = item["ext"]
+            fps = item["fps"] if item.get("fps") else ""
+            b_name = f"{h}p{fps}-{ext}"
+            ba_ext = "[ext=m4a]" if is_m4a and ext == "mp4" else ""
+            v_fmt  = f"{fid}+ba{ba_ext}/b[height=?{h}]"
+        else:
+            continue
+        fmts.setdefault(b_name, {})[f"{item['tbr']}"] = [size, v_fmt]
+    return fmts, False
+
+# ── YT Keyboards ──────────────────────────────────────────────────────────────
+def _yt_kb_main(fmts, uid, is_pl, tl):
+    btns = []; row = []
+    if is_pl:
+        for key in ["144|mp4","240|mp4","360|mp4","480|mp4","720|mp4","1080|mp4","1440|mp4","2160|mp4"]:
+            row.append(InlineKeyboardButton(f"{key.split('|')[0]}p-mp4", callback_data=f"yl|{uid}|fmt|{key}"))
+            if len(row) == 3: btns.append(row); row = []
+        if row: btns.append(row); row = []
+        for key in ["144|webm","240|webm","360|webm","480|webm","720|webm","1080|webm","1440|webm","2160|webm"]:
+            row.append(InlineKeyboardButton(f"{key.split('|')[0]}p-webm", callback_data=f"yl|{uid}|fmt|{key}"))
+            if len(row) == 3: btns.append(row); row = []
+        if row: btns.append(row)
+        msg = f"📋 **Playlist Quality:**\n⏳ `{yt_time_fmt(tl)}`"
+    else:
+        for b_name, tbr_dict in fmts.items():
+            if len(tbr_dict) == 1:
+                tbr, vl = next(iter(tbr_dict.items()))
+                row.append(InlineKeyboardButton(f"{b_name} ({yt_humanbytes(vl[0])})", callback_data=f"yl|{uid}|sub|{b_name}|{tbr}"))
+            else:
+                row.append(InlineKeyboardButton(b_name, callback_data=f"yl|{uid}|dict|{b_name}"))
+            if len(row) == 2: btns.append(row); row = []
+        if row: btns.append(row)
+        msg = f"🎬 **Select Quality:**\n⏳ `{yt_time_fmt(tl)}`"
+    btns.append([
+        InlineKeyboardButton("🎵 MP3", callback_data=f"yl|{uid}|mp3|"),
+        InlineKeyboardButton("🎧 Audio Formats", callback_data=f"yl|{uid}|audiofmt|"),
+    ])
+    btns.append([
+        InlineKeyboardButton("⭐ Best Video", callback_data=f"yl|{uid}|fmt|bv*+ba/b"),
+        InlineKeyboardButton("🔊 Best Audio", callback_data=f"yl|{uid}|fmt|ba/b"),
+    ])
+    btns.append([InlineKeyboardButton("❌ Cancel", callback_data=f"yl|{uid}|cancel|")])
+    return msg, InlineKeyboardMarkup(btns)
+
+def _yt_kb_sub(b_name, tbr_dict, uid, tl):
+    btns = []; row = []
+    for tbr, vl in tbr_dict.items():
+        row.append(InlineKeyboardButton(f"{tbr}K ({yt_humanbytes(vl[0])})", callback_data=f"yl|{uid}|sub|{b_name}|{tbr}"))
+        if len(row) == 2: btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("◀️ Back", callback_data=f"yl|{uid}|back|"),
+                 InlineKeyboardButton("❌ Cancel", callback_data=f"yl|{uid}|cancel|")])
+    return f"🎚️ **{b_name}** bitrate:\n⏳ `{yt_time_fmt(tl)}`", InlineKeyboardMarkup(btns)
+
+def _yt_kb_mp3(uid, tl):
+    return (f"🎵 MP3 Bitrate:\n⏳ `{yt_time_fmt(tl)}`", InlineKeyboardMarkup([[
+        InlineKeyboardButton("64K",  callback_data=f"yl|{uid}|fmt|ba/b-mp3-64"),
+        InlineKeyboardButton("128K", callback_data=f"yl|{uid}|fmt|ba/b-mp3-128"),
+        InlineKeyboardButton("192K", callback_data=f"yl|{uid}|fmt|ba/b-mp3-192"),
+        InlineKeyboardButton("320K", callback_data=f"yl|{uid}|fmt|ba/b-mp3-320"),
+    ],[InlineKeyboardButton("◀️ Back", callback_data=f"yl|{uid}|back|"),
+       InlineKeyboardButton("❌ Cancel", callback_data=f"yl|{uid}|cancel|")]]))
+
+def _yt_kb_audiofmt(uid, tl):
+    btns = []; row = []
+    for f in ["aac", "alac", "flac", "m4a", "mp3", "opus", "vorbis", "wav"]:
+        row.append(InlineKeyboardButton(f, callback_data=f"yl|{uid}|audioq|ba/b-{f}-"))
+        if len(row) == 4: btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("◀️ Back", callback_data=f"yl|{uid}|back|"),
+                 InlineKeyboardButton("❌ Cancel", callback_data=f"yl|{uid}|cancel|")])
+    return f"🎧 Audio Format:\n⏳ `{yt_time_fmt(tl)}`", InlineKeyboardMarkup(btns)
+
+def _yt_kb_audioq(prefix, uid, tl):
+    btns = []; row = []
+    for q in range(11):
+        row.append(InlineKeyboardButton(str(q), callback_data=f"yl|{uid}|fmt|{prefix}{q}"))
+        if len(row) == 4: btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("◀️ Back", callback_data=f"yl|{uid}|audiofmt|"),
+                 InlineKeyboardButton("❌ Cancel", callback_data=f"yl|{uid}|cancel|")])
+    return f"🎚️ Quality (0=best, 10=worst):\n⏳ `{yt_time_fmt(tl)}`", InlineKeyboardMarkup(btns)
+
+def _yt_kb_playlist(uid, total):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📥 Download All ({total})", callback_data=f"ylpl|{uid}|all")],
+        [InlineKeyboardButton("🎯 Select Videos", callback_data=f"ylpl|{uid}|select")],
+        [InlineKeyboardButton("🖼️ Thumbnails", callback_data=f"ylpl|{uid}|thumbs"),
+         InlineKeyboardButton("❌ Cancel", callback_data=f"ylpl|{uid}|cancel")],
+    ])
+
+# ── Info Extraction (blocking, runs in executor) ──────────────────────────────
+def _yt_blocking_info(url):
+    try:
+        with yt_dlp.YoutubeDL(_yt_info_opts()) as ydl:
+            r = ydl.extract_info(url, download=False)
+            if r is None: raise ValueError("Info result is None")
+            return r
+    except Exception as e:
+        yt_logger.error(f"Info: {e}")
+        return None
+
+def _yt_blocking_playlist_info(url):
+    opts = _yt_info_opts()
+    opts.pop("playlist_items", None)
+    opts.pop("format", None)
+    opts.update({"extract_flat": True, "playlistend": YT_MAX_PL, "ignoreerrors": True})
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as e:
+        yt_logger.error(f"PL info: {e}")
+        return None
+
+# ── Download (blocking, runs in executor) ─────────────────────────────────────
+def _yt_blocking_download(url, fmt, out_tmpl, smsg, loop, is_pl=False):
+    try:
+        tracker = YtDlpProgress(smsg, loop, is_pl=is_pl)
+        opts    = _yt_dl_opts(fmt, out_tmpl, tracker, is_pl)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info   = ydl.extract_info(url, download=True)
+            if not info: return None
+            actual = ydl.prepare_filename(info)
+            if fmt.startswith("ba/b") or fmt == "mp3":
+                parts = fmt.split("-") if "-" in fmt else ["ba/b", "mp3", "192"]
+                afmt  = parts[1] if len(parts) > 1 else "mp3"
+                ext   = "ogg" if afmt == "vorbis" else "m4a" if afmt == "alac" else afmt
+                actual = os.path.splitext(actual)[0] + f".{ext}"
+            if not os.path.exists(actual):
+                dl_dir = os.path.dirname(actual)
+                base   = os.path.splitext(os.path.basename(actual))[0][:30]
+                for f in os.listdir(dl_dir or "."):
+                    if base in f and not f.endswith((".jpg", ".jpeg", ".png", ".webp", ".part")):
+                        actual = os.path.join(dl_dir or ".", f); break
+            if not os.path.exists(actual) or os.path.getsize(actual) == 0:
+                dl_dir = os.path.dirname(actual); found = None; best_sz = 0
+                for f in os.listdir(dl_dir or "."):
+                    if f.endswith((".jpg", ".jpeg", ".png", ".webp", ".part", ".ytdl")): continue
+                    fp2 = os.path.join(dl_dir or ".", f); fsz = os.path.getsize(fp2)
+                    if fsz > best_sz: best_sz = fsz; found = fp2
+                if found and best_sz > 0: actual = found
+                else: return None
+            if not os.path.exists(actual) or os.path.getsize(actual) == 0:
+                return None
+            real_info = info
+            if "entries" in info and info["entries"]:
+                real_info = info["entries"][0] or info
+            return {"filepath": actual, "info": real_info,
+                    "duration": real_info.get("duration", 0),
+                    "title": real_info.get("title", "Video")}
+    except Exception as e:
+        yt_logger.error(f"DL: {e}")
+        return None
+
+# ── YT Upload ─────────────────────────────────────────────────────────────────
+def _yt_find_thumb(dl_dir):
+    for f in os.listdir(dl_dir):
+        if f.endswith((".jpg", ".jpeg")):
+            return os.path.join(dl_dir, f)
+    return None
+
+async def _yt_upload(chat_id, result, fmt, smsg):
+    fp    = result["filepath"]
+    info  = result["info"]
+    dur   = result["duration"]
+    upl   = info.get("uploader", "") or info.get("channel", "")
+    sz    = os.path.getsize(fp)
+    fname = os.path.basename(fp)
+    cap   = f"📁 `{fname}`"
+    thumb = _yt_find_thumb(os.path.dirname(fp))
+    if sz > 2 * 1024**3:
+        await _yt_safe_edit(smsg, "❌ File >2GB!"); return False
+    start = time.time()
+    try:
+        is_audio = fmt.startswith("ba/b") or fmt == "mp3"
+        if is_audio:
+            await app.send_audio(chat_id, fp, caption=cap, duration=dur,
+                title=fname[:64], performer=upl, thumb=thumb,
+                progress=yt_upload_progress, progress_args=(smsg, start, "Uploading Audio..."))
+        else:
+            await app.send_video(chat_id, fp, caption=cap, duration=dur,
+                width=info.get("width", 1280), height=info.get("height", 720),
+                thumb=thumb, supports_streaming=True,
+                progress=yt_upload_progress, progress_args=(smsg, start, "Uploading Video..."))
+        return True
+    except Exception as e:
+        yt_logger.error(f"Upload: {e}")
+        await _yt_safe_edit(smsg, f"❌ Upload failed: `{str(e)[:200]}`")
+        return False
+
+# ── Quality Picker ────────────────────────────────────────────────────────────
+async def _yt_show_quality_picker(url, smsg, user_id=None):
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(None, _yt_blocking_info, url)
+    if not info:
+        await _yt_safe_edit(smsg,
+            "❌ **Could not fetch video info!**\n\n"
+            "• Private/age-restricted video?\n"
+            "• Try refreshing cookies.txt\n"
+            "• Check the URL is correct")
+        return
+    fmts, is_pl = yt_parse_formats(info)
+    uid = _yt_new_uid()
+    YT_URL_SESSIONS[uid] = {
+        "url": url, "info": info, "fmts": fmts,
+        "is_pl": is_pl, "created": time.time(), "timeout": 120,
+        "user_id": user_id,
+    }
+    title  = (info.get("title", "") or "")[:60]
+    upl    = info.get("uploader", "") or info.get("channel", "")
+    dur    = yt_time_fmt(info.get("duration", 0))
+    views  = info.get("view_count", 0) or 0
+    likes  = info.get("like_count",  0) or 0
+    udate  = info.get("upload_date", "")
+    if udate:
+        try: udate = datetime.strptime(udate, "%Y%m%d").strftime("%d %b %Y")
+        except: pass
+    info_txt = (
+        f"🎬 **{title}**\n\n"
+        f"👤 `{upl}`\n"
+        f"⏱️ `{dur}`  📅 `{udate}`\n"
+        f"👁️ `{views:,}`  ❤️ `{likes:,}`\n\n"
+    )
+    q_msg, kb = _yt_kb_main(fmts, uid, is_pl, 120)
+    thumb = info.get("thumbnail")
+    with suppress(Exception): await smsg.delete()
+    try:
+        if thumb:
+            await smsg.reply_photo(photo=thumb, caption=info_txt + q_msg, reply_markup=kb)
+        else:
+            raise Exception()
+    except Exception:
+        with suppress(Exception):
+            await smsg.reply_text(info_txt + q_msg, reply_markup=kb)
+
+# ── Playlist selection text handler ──────────────────────────────────────────
+@app.on_message(filters.text & ~filters.command(["start","help","settings","l","leech","ql","yl","ytleech","stop","setdump","ping"]))
+async def yt_handle_selection_text(client, message: Message):
+    """Intercepts text replies when user is in playlist video-selection mode."""
+    uid = message.from_user.id
+    if uid not in YT_WAITING_SEL:
+        return
+    pl_uid = YT_WAITING_SEL[uid]
+    e      = YT_PL_SESSIONS.get(pl_uid)
+    if not e:
+        YT_WAITING_SEL.pop(uid, None); return
+    total   = len(e["entries"])
+    indices = _yt_parse_sel(message.text.strip(), total)
+    if indices is None:
+        await message.reply_text(f"❌ Invalid selection!\nFormat: `1,3,5` or `1-10`\nTotal: `{total}`")
+        return
+    e["sel"] = indices
+    YT_WAITING_SEL.pop(uid, None)
+    smsg = await message.reply_text(f"✅ `{len(indices)}` selected. Fetching quality options...")
+    loop = asyncio.get_running_loop()
+    fu   = e["entries"][indices[0]].get("url") or e["entries"][indices[0]].get("webpage_url")
+    try:
+        info = await loop.run_in_executor(None, _yt_blocking_info, fu)
+        if not info: raise ValueError()
+        fmts, _ = yt_parse_formats(info)
+        s_uid   = _yt_new_uid()
+        YT_URL_SESSIONS[s_uid] = {
+            "url": e["url"], "info": info, "fmts": fmts,
+            "is_pl": True, "created": time.time(), "timeout": 120,
+            "user_id": uid, "pl_uid": pl_uid, "pl_indices": indices,
+        }
+        msg_t, kb = _yt_kb_main(fmts, s_uid, False, 120)
+        await smsg.edit_text(f"🎨 **Quality:** `{len(indices)}` videos:\n\n{msg_t}", reply_markup=kb)
+    except Exception as ex:
+        await _yt_safe_edit(smsg, f"❌ {ex}")
+
+
+# ── /yl command ───────────────────────────────────────────────────────────────
+@app.on_message(filters.command(["yl", "ytleech"]))
+async def yl_command(client, message: Message):
+    """Download a YouTube (or any yt-dlp-supported) URL and leech to Telegram."""
+    if not yt_is_auth(message.from_user.id):
+        return await message.reply_text("⛔ Not authorized.")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.reply_text(
+            "❌ **Usage:** `/yl <youtube_url>`\n\n"
+            "**Examples:**\n"
+            "• `/yl https://youtu.be/dQw4w9WgXcQ`\n"
+            "• `/yl https://youtube.com/playlist?list=PLxxx`\n\n"
+            "Supports: YouTube, Instagram, TikTok, Twitter, Vimeo, SoundCloud & more."
+        )
+    raw_url = yt_extract_url(args[1]) or args[1].strip()
+    url = yt_clean_url(raw_url)
+    if not url.startswith(("http://", "https://", "rtmp://")):
+        return await message.reply_text("❌ Invalid URL. Please send a valid link.")
+    _yt_cleanup()
+    status = await message.reply_text("🔍 **Fetching info...**")
+    loop = asyncio.get_running_loop()
+    if yt_is_playlist(url):
+        await _yt_safe_edit(status, "📋 **Fetching playlist info...**")
+        info = await loop.run_in_executor(None, _yt_blocking_playlist_info, url)
+        if info and info.get("_type") == "playlist":
+            entries = [e for e in (info.get("entries") or []) if e][:YT_MAX_PL]
+            if entries:
+                p_uid = _yt_new_uid()
+                YT_PL_SESSIONS[p_uid] = {"url": url, "entries": entries,
+                                          "info": info, "created": time.time(),
+                                          "user_id": message.from_user.id}
+                total_dur = sum(e.get("duration", 0) or 0 for e in entries)
+                pl_title  = (info.get("title", "Playlist"))[:60]
+                channel   = info.get("uploader") or info.get("channel", "")
+                vl = ""
+                for i, e in enumerate(entries[:12], 1):
+                    vl += f"`{i:02d}.` {(e.get('title') or f'Video {i}')[:35]} `[{yt_time_fmt(e.get('duration', 0))}]`\n"
+                if len(entries) > 12: vl += f"_...and {len(entries)-12} more_"
+                cap = (f"📋 **{pl_title}**\n👤 `{channel}`\n"
+                       f"🎬 `{len(entries)}` videos  ⏱️ `{yt_time_fmt(total_dur)}`\n\n{vl}\n\n**What to download?**")
+                with suppress(Exception): await status.delete()
+                try:
+                    th = (info.get("thumbnails") or [{}])[-1].get("url", "")
+                    if th: await message.reply_photo(photo=th, caption=cap, reply_markup=_yt_kb_playlist(p_uid, len(entries)))
+                    else:  raise Exception()
+                except Exception:
+                    await message.reply_text(cap, reply_markup=_yt_kb_playlist(p_uid, len(entries)))
+                return
+    await _yt_show_quality_picker(url, status, message.from_user.id)
+
+# ── Quality Picker Callback ────────────────────────────────────────────────────
+@app.on_callback_query(filters.regex(r"^yl\|"))
+async def yt_quality_cb(client, cq: CallbackQuery):
+    parts  = cq.data.split("|")
+    uid    = parts[1]; action = parts[2]; rest = parts[3:] if len(parts) > 3 else []
+    e      = YT_URL_SESSIONS.get(uid)
+    if not e:
+        await safe_answer(cq, "⚠️ Session expired! Send the link again.", show_alert=True); return
+    if e.get("user_id") and cq.from_user.id != e["user_id"]:
+        await safe_answer(cq, "❌ This is not your menu!", show_alert=True); return
+    await safe_answer(cq)
+    tl = max(0, e["timeout"] - (time.time() - e["created"]))
+    fmts = e["fmts"]; is_pl = e["is_pl"]
+
+    if action == "cancel":
+        YT_URL_SESSIONS.pop(uid, None)
+        with suppress(Exception): await cq.message.delete()
+        return
+    if action == "back":
+        msg, kb = _yt_kb_main(fmts, uid, is_pl, tl)
+        await cq.message.edit_text(msg, reply_markup=kb); return
+    if action == "mp3":
+        msg, kb = _yt_kb_mp3(uid, tl)
+        await cq.message.edit_text(msg, reply_markup=kb); return
+    if action == "audiofmt":
+        msg, kb = _yt_kb_audiofmt(uid, tl)
+        await cq.message.edit_text(msg, reply_markup=kb); return
+    if action == "audioq":
+        prefix = rest[0] if rest else "ba/b-mp3-"
+        msg, kb = _yt_kb_audioq(prefix, uid, tl)
+        await cq.message.edit_text(msg, reply_markup=kb); return
+    if action == "dict":
+        b_name = rest[0]; tbr_dict = fmts.get(b_name, {})
+        msg, kb = _yt_kb_sub(b_name, tbr_dict, uid, tl)
+        await cq.message.edit_text(msg, reply_markup=kb); return
+    if action == "sub":
+        b_name = rest[0]; tbr = rest[1]
+        vl = fmts.get(b_name, {}).get(tbr)
+        if not vl: await safe_answer(cq, "Format not found!"); return
+        await _yt_start_dl(uid, vl[1], e, cq, client); return
+    if action == "fmt":
+        qual = rest[0] if rest else "bv*+ba/b"
+        if "|" in qual and qual in fmts: qual = fmts[qual]
+        await _yt_start_dl(uid, qual, e, cq, client); return
+
+# ── Playlist Callback ─────────────────────────────────────────────────────────
+@app.on_callback_query(filters.regex(r"^ylpl\|"))
+async def yt_playlist_cb(client, cq: CallbackQuery):
+    parts = cq.data.split("|"); uid = parts[1]; sub = parts[2]
+    e = YT_PL_SESSIONS.get(uid)
+    if sub == "cancel":
+        YT_PL_SESSIONS.pop(uid, None); YT_WAITING_SEL.pop(cq.from_user.id, None)
+        with suppress(Exception): await cq.message.delete()
+        await safe_answer(cq); return
+    if not e: await safe_answer(cq, "⚠️ Session expired!", show_alert=True); return
+    await safe_answer(cq)
+
+    if sub == "thumbs":
+        sm = await cq.message.reply_text("🖼️ Fetching thumbnails..."); sent = 0
+        for i, en in enumerate(e["entries"], 1):
+            tu = en.get("thumbnail") or (en.get("thumbnails") or [{}])[-1].get("url", "")
+            if not tu: continue
+            try:
+                r = requests.get(tu, timeout=10)
+                if r.status_code != 200: continue
+                p = os.path.join(YT_DL_DIR, f"th_{uid}_{i}.jpg")
+                with open(p, "wb") as f: f.write(r.content)
+                await client.send_document(cq.message.chat.id, p,
+                    caption=f"🖼️ `{i}.` {(en.get('title') or '')[:40]}")
+                with suppress(Exception): os.remove(p)
+                sent += 1; await asyncio.sleep(0.5)
+            except Exception: pass
+            if i % 5 == 0: await _yt_safe_edit(sm, f"🖼️ `{i}/{len(e['entries'])}`...")
+        await _yt_safe_edit(sm, f"✅ `{sent}` thumbnails sent!"); return
+
+    if sub == "select":
+        YT_WAITING_SEL[cq.from_user.id] = uid; total = len(e["entries"]); vl = ""
+        for i, en in enumerate(e["entries"][:20], 1):
+            vl += f"`{i:02d}.` {(en.get('title') or f'Video {i}')[:35]} `[{yt_time_fmt(en.get('duration', 0))}]`\n"
+        if total > 20: vl += f"_...{total-20} more_"
+        await cq.message.reply_text(
+            f"🎯 **Select videos:**\nTotal: `{total}`\n\n{vl}\nFormat: `1,3,5` or `1-10`"); return
+
+    if sub == "all":
+        sm = await cq.message.reply_text("🔍 Fetching quality options...")
+        loop = asyncio.get_running_loop()
+        fu = e["entries"][0].get("url") or e["entries"][0].get("webpage_url")
+        try:
+            info = await loop.run_in_executor(None, _yt_blocking_info, fu)
+            if not info: raise ValueError()
+            fmts2, _ = yt_parse_formats(info)
+            s_uid = _yt_new_uid()
+            YT_URL_SESSIONS[s_uid] = {
+                "url": e["url"], "info": info, "fmts": fmts2,
+                "is_pl": True, "created": time.time(), "timeout": 120,
+                "user_id": cq.from_user.id, "pl_uid": uid,
+                "pl_indices": list(range(len(e["entries"]))),
+            }
+            msg_t, kb = _yt_kb_main(fmts2, s_uid, True, 120)
+            await sm.edit_text(f"🎨 **Quality:**\n📋 `{len(e['entries'])}` videos:\n\n{msg_t}", reply_markup=kb)
+        except Exception as ex:
+            await _yt_safe_edit(sm, f"❌ {ex}")
+
+# ── Download Tasks ─────────────────────────────────────────────────────────────
+async def _yt_start_dl(uid, qual, e, cq, client):
+    YT_URL_SESSIONS.pop(uid, None)
+    chat_id    = cq.message.chat.id
+    url        = e["url"]
+    pl_uid     = e.get("pl_uid")
+    pl_indices = e.get("pl_indices")
+    smsg = await cq.message.reply_text(f"⚙️ **Starting download...**\n🎞️ `{qual[:50]}`")
+    if pl_uid and pl_indices is not None:
+        pl_e    = YT_PL_SESSIONS.get(pl_uid, {})
+        entries = [pl_e["entries"][i] for i in pl_indices if i < len(pl_e.get("entries", []))]
+        asyncio.create_task(_yt_dl_playlist(entries, qual, e["info"], smsg, client, chat_id, pl_uid))
+    else:
+        asyncio.create_task(_yt_dl_single(url, qual, smsg, client, chat_id))
+
+async def _yt_dl_single(url, qual, smsg, client, chat_id):
+    loop    = asyncio.get_running_loop()
+    uid     = _yt_new_uid()
+    dl_dir  = os.path.join(YT_DL_DIR, uid)
+    os.makedirs(dl_dir, exist_ok=True)
+    out_tmpl = os.path.join(dl_dir, "%(title,fulltitle,alt_title)s %(height)sp%(fps)s.fps %(tbr)d.%(ext)s")
+    await _yt_safe_edit(smsg, "⬇️ **Downloading...**")
+    result = await loop.run_in_executor(None, _yt_blocking_download, url, qual, out_tmpl, smsg, loop, False)
+    if not result:
+        await _yt_safe_edit(smsg, "❌ **Download failed!**\n\n• Refresh cookies.txt\n• Private video?\n• Check URL")
+        with suppress(Exception): shutil.rmtree(dl_dir)
+        return
+    await _yt_safe_edit(smsg, f"📤 **Uploading...**\n📦 `{yt_humanbytes(os.path.getsize(result['filepath']))}`")
+    ok = await _yt_upload(chat_id, result, qual, smsg)
+    if ok:
+        with suppress(Exception): await smsg.delete()
+    with suppress(Exception): shutil.rmtree(dl_dir)
+
+async def _yt_dl_playlist(entries, qual, base_info, smsg, client, chat_id, pl_uid):
+    loop = asyncio.get_running_loop(); total = len(entries); failed = []
+    for idx, en in enumerate(entries, 1):
+        vid_id = en.get("id", ""); ie_key = en.get("ie_key", "") or en.get("extractor", "")
+        if vid_id and ("youtube" in ie_key.lower() or not en.get("url")):
+            vurl = f"https://www.youtube.com/watch?v={vid_id}"
+        else:
+            vurl = en.get("url") or en.get("webpage_url") or ""
+            if vurl and not vurl.startswith("http"):
+                vurl = f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
+        if not vurl:
+            failed.append(en.get("title") or f"Video {idx}"); continue
+        vtitle = (en.get("title") or f"Video {idx}")[:50]
+        prefix = f"📋 **{idx}/{total}** — `{vtitle}`\n\n"
+        await _yt_safe_edit(smsg, f"{prefix}⬇️ Downloading...")
+        uid    = _yt_new_uid()
+        dl_dir = os.path.join(YT_DL_DIR, uid)
+        os.makedirs(dl_dir, exist_ok=True)
+        out_tmpl = os.path.join(dl_dir, "%(title,fulltitle,alt_title)s %(height)sp%(fps)s.fps %(tbr)d.%(ext)s")
+        result = await loop.run_in_executor(None, _yt_blocking_download, vurl, qual, out_tmpl, smsg, loop, False)
+        if not result:
+            failed.append(vtitle)
+            with suppress(Exception): shutil.rmtree(dl_dir)
+            continue
+        await _yt_safe_edit(smsg, f"{prefix}📤 `{yt_humanbytes(os.path.getsize(result['filepath']))}`...")
+        ok = await _yt_upload(chat_id, result, qual, smsg)
+        with suppress(Exception): shutil.rmtree(dl_dir)
+        if not ok: failed.append(vtitle)
+    YT_PL_SESSIONS.pop(pl_uid, None)
+    if failed:
+        await _yt_safe_edit(smsg,
+            f"✅ `{total-len(failed)}/{total}` uploaded.\n❌ Failed:\n" +
+            "\n".join(f"• `{t}`" for t in failed[:10]))
+    else:
+        await _yt_safe_edit(smsg, f"✅ **Playlist done!** `{total}` videos! 🎉")
+
+def _yt_parse_sel(text, total):
+    idx = set()
+    try:
+        for p in text.strip().split(","):
+            p = p.strip()
+            if "-" in p:
+                a, b = map(int, p.split("-", 1))
+                if a < 1 or b > total or a > b: return None
+                idx.update(range(a - 1, b))
+            else:
+                n = int(p)
+                if n < 1 or n > total: return None
+                idx.add(n - 1)
+        return sorted(idx)
+    except: return None
 
 
 if __name__ == "__main__":
