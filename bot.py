@@ -28,6 +28,8 @@ from config import (
     MONGO_URL
 )
 
+
+
 try:
     import uvloop; uvloop.install(); print("uvloop ok")
 except ImportError: pass
@@ -42,45 +44,6 @@ app = Client(
 )
 aria2    = aria2p.API(aria2p.Client(host=ARIA2_HOST, port=ARIA2_PORT, secret=ARIA2_SECRET))
 executor = ThreadPoolExecutor(max_workers=4)
-
-YT_SOLVER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt_solver.ts")
-
-_YT_RE = re.compile(
-    r"(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/)"
-    r"[A-Za-z0-9_\-]{11}",
-    re.IGNORECASE,
-)
-
-def is_youtube_url(url: str) -> bool:
-    return bool(_YT_RE.search(url))
-
-async def resolve_youtube_url(url: str, quality: str = "best") -> dict:
-    """
-    Run yt_solver.ts via Deno and return the parsed JSON result.
-    Returns dict with keys: ok, url, audio_url?, filename, ext, filesize?, needs_mux, error?
-    """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "deno", "run",
-            "--allow-run", "--allow-env",
-            YT_SOLVER_SCRIPT,
-            url, quality,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-        raw = stdout.decode().strip()
-        if not raw:
-            err = stderr.decode().strip()
-            return {"ok": False, "error": err or "yt_solver.ts produced no output"}
-        return __import__("json").loads(raw)
-    except asyncio.TimeoutError:
-        return {"ok": False, "error": "yt_solver.ts timed out after 60s"}
-    except FileNotFoundError:
-        return {"ok": False, "error": "Deno not found — install Deno to use YouTube support"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
 
 async def aria2_run(fn, *args, **kwargs):
     """Run a synchronous aria2p call in the thread executor.
@@ -1100,60 +1063,8 @@ async def universal_leech_command(client, message: Message):
     if not links:
         await message.reply_text("❌ **Usage:** `/ql <link1> <link2>` or reply to a `.torrent` file.\n❌ `/l <link>` for direct links"); return
 
-    # parse optional quality flag: /l https://youtu.be/xxx -q 720
-    yt_quality = "best"
-    if "-q" in args:
-        qi = args.index("-q")
-        if qi + 1 < len(args):
-            yt_quality = args[qi + 1]
-
     for link in links:
         try:
-            # ── YouTube: resolve via Deno yt_solver.ts ─────────────────────
-            if is_youtube_url(link):
-                resolving_msg = await message.reply_text(
-                    f"🔍 **Resolving YouTube URL...**\n`{link[:60]}{'...' if len(link)>60 else ''}`"
-                )
-                result = await resolve_youtube_url(link, yt_quality)
-                try:
-                    await resolving_msg.delete()
-                except Exception:
-                    pass
-
-                if not result.get("ok"):
-                    await message.reply_text(
-                        f"❌ **YouTube resolver failed:**\n`{result.get('error', 'Unknown error')}`"
-                    )
-                    continue
-
-                if result.get("needs_mux"):
-                    # Two streams — download separately then mux with ffmpeg
-                    video_link = result["url"]
-                    audio_link = result["audio_url"]
-                    title_base = result.get("filename", "video").rsplit(".", 1)[0]
-
-                    # Rename final file to .mkv; aria2 downloads to temp names
-                    v_opts = {**DIRECT_OPTIONS, "out": f"{title_base}.video.part"}
-                    a_opts = {**DIRECT_OPTIONS, "out": f"{title_base}.audio.part"}
-
-                    dl_v = await aria2_run(aria2.add_uris, [video_link], options=v_opts)
-                    task_v = DownloadTask(dl_v.gid, user_id, False)
-                    task_v.dl["filename"] = f"{title_base} (video stream)"
-                    task_v._yt_mux_peer   = audio_link
-                    task_v._yt_title_base = title_base
-                    asyncio.create_task(process_yt_mux_task(message, task_v, dl_v, audio_link, title_base))
-                else:
-                    # Single combined stream — hand straight to aria2
-                    direct_url = result["url"]
-                    fname      = result.get("filename", "video.mp4")
-                    opts = {**DIRECT_OPTIONS, "out": fname}
-                    dl   = await aria2_run(aria2.add_uris, [direct_url], options=opts)
-                    task = DownloadTask(dl.gid, user_id, extract)
-                    task.dl["filename"] = result.get("title", fname)
-                    asyncio.create_task(process_task_execution(message, task, dl, extract))
-                continue
-
-            # ── Non-YouTube: pass directly to aria2 ───────────────────────
             opts = BT_OPTIONS if link.startswith("magnet:") else {**BT_OPTIONS, **DIRECT_OPTIONS}
             dl   = await aria2_run(aria2.add_uris, [link], options=opts)
             task = DownloadTask(dl.gid, user_id, extract)
@@ -1227,10 +1138,8 @@ async def help_command(client, message: Message):
         "**📖 Leech Bot — Help & Commands**\n\n"
         "**📥 Download Commands:**\n"
         "• `/ql <link1> <link2>` — Download multiple direct/magnet links at once\n"
-        "• `/l <link>` — Single direct link / magnet download\n"
+        "• `/l <link>` — Single direct link download\n"
         "• `/l <link> -e` — Download & auto-extract archive\n"
-        "• `/l <yt_url>` — YouTube: auto-resolve best quality via yt-dlp + Deno\n"
-        "• `/l <yt_url> -q 720` — YouTube at specific quality (`best`/`1080`/`720`/`480`/`360`/`audio`)\n"
         "• **Upload a `.torrent` file** directly to start\n\n"
         "**⚙️ Control:**\n"
         "• `/settings` — Toggle Document / Video upload mode\n"
@@ -1385,147 +1294,6 @@ async def del_thumb_callback(client, cq: CallbackQuery):
 async def noop_callback(client, cq: CallbackQuery):
     await safe_answer(cq, "ℹ️ Send a photo with /setthumbnail to set a custom thumbnail.")
 
-
-
-# ── YouTube mux task processor ────────────────────────────────────────────────
-async def process_yt_mux_task(
-    message: Message,
-    video_task: DownloadTask,
-    video_dl,
-    audio_url: str,
-    title_base: str,
-):
-    """
-    Download the video stream via aria2, then download the audio stream,
-    then mux both with ffmpeg into a single .mkv file, then upload.
-    """
-    user_id = video_task.user_id
-    active_downloads[video_task.gid] = video_task
-
-    try:
-        # ── Phase 1: download video stream ────────────────────────────────
-        asyncio.create_task(poll_download_progress(video_task))
-        await push_dashboard_update(user_id)
-
-        while not video_task.cancelled:
-            await asyncio.sleep(2)
-            try:
-                cdl = await aria2_run(aria2.get_download, video_task.gid)
-            except Exception:
-                break
-            if cdl.is_complete:
-                break
-            if getattr(cdl, "has_failed", False):
-                active_downloads.pop(video_task.gid, None)
-                video_task.cancelled = True
-                await message.reply_text(f"❌ **Video stream failed:** `{cdl.error_message}`")
-                cleanup_files(video_task)
-                await push_dashboard_update(user_id)
-                return
-
-        if video_task.cancelled:
-            try:
-                _dl = await aria2_run(aria2.get_download, video_task.gid)
-                await aria2_run(aria2.remove, [_dl], force=True, files=True)
-            except Exception:
-                pass
-            cleanup_files(video_task)
-            active_downloads.pop(video_task.gid, None)
-            await push_dashboard_update(user_id)
-            return
-
-        fdl      = await aria2_run(aria2.get_download, video_task.gid)
-        v_path   = os.path.join(DOWNLOAD_DIR, fdl.name)
-        if not os.path.exists(v_path):
-            # fallback: newest file in DOWNLOAD_DIR
-            entries = [os.path.join(DOWNLOAD_DIR, e) for e in os.listdir(DOWNLOAD_DIR)]
-            if entries:
-                v_path = max(entries, key=os.path.getmtime)
-        video_task.file_path = v_path
-
-        # ── Phase 2: download audio stream ────────────────────────────────
-        a_out  = f"{title_base}.audio.part"
-        a_opts = {**DIRECT_OPTIONS, "out": a_out}
-        a_dl   = await aria2_run(aria2.add_uris, [audio_url], options=a_opts)
-
-        audio_task         = DownloadTask(a_dl.gid, user_id, False)
-        audio_task.dl["filename"] = f"{title_base} (audio stream)"
-        active_downloads[audio_task.gid] = audio_task
-        asyncio.create_task(poll_download_progress(audio_task))
-        await push_dashboard_update(user_id)
-
-        while not audio_task.cancelled:
-            await asyncio.sleep(2)
-            try:
-                cdl2 = await aria2_run(aria2.get_download, audio_task.gid)
-            except Exception:
-                break
-            if cdl2.is_complete:
-                break
-            if getattr(cdl2, "has_failed", False):
-                active_downloads.pop(audio_task.gid, None)
-                audio_task.cancelled = True
-                await message.reply_text(f"❌ **Audio stream failed:** `{cdl2.error_message}`")
-                cleanup_files(video_task)
-                cleanup_files(audio_task)
-                active_downloads.pop(video_task.gid, None)
-                await push_dashboard_update(user_id)
-                return
-
-        fdl2   = await aria2_run(aria2.get_download, audio_task.gid)
-        a_path = os.path.join(DOWNLOAD_DIR, fdl2.name)
-        if not os.path.exists(a_path):
-            entries = [os.path.join(DOWNLOAD_DIR, e) for e in os.listdir(DOWNLOAD_DIR)
-                       if e != os.path.basename(v_path)]
-            if entries:
-                a_path = max(entries, key=os.path.getmtime)
-
-        active_downloads.pop(audio_task.gid, None)
-
-        # ── Phase 3: mux with ffmpeg ──────────────────────────────────────
-        out_path = os.path.join(DOWNLOAD_DIR, sanitize := f"{title_base[:100]}.mkv")
-        video_task.current_phase = "ext"
-        video_task.ext["filename"] = f"Muxing: {title_base[:60]}"
-        await push_dashboard_update(user_id)
-
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y",
-            "-i", v_path,
-            "-i", a_path,
-            "-c:v", "copy", "-c:a", "copy",
-            "-movflags", "+faststart",
-            out_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.communicate()
-
-        # remove stream files
-        for p in (v_path, a_path):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
-
-        if not os.path.exists(out_path):
-            await message.reply_text("❌ **ffmpeg mux failed** — make sure ffmpeg is installed.")
-            active_downloads.pop(video_task.gid, None)
-            await push_dashboard_update(user_id)
-            return
-
-        video_task.file_path = out_path
-
-        # ── Phase 4: upload ───────────────────────────────────────────────
-        await upload_to_telegram(out_path, message, caption="", task=video_task)
-        cleanup_files(video_task)
-        active_downloads.pop(video_task.gid, None)
-        await push_dashboard_update(user_id)
-
-    except Exception as e:
-        await message.reply_text(f"❌ **YT mux error:** `{str(e)}`")
-        cleanup_files(video_task)
-        active_downloads.pop(video_task.gid, None)
-        await push_dashboard_update(user_id)
 
 
 # ── Keep-alive web server ─────────────────────────────────────────────────────
