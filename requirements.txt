@@ -11,3 +11,5 @@ curl-cffi>=0.7.0
 yt-dlp
 requests
 python-dotenv
+ffmpeg
+deno
