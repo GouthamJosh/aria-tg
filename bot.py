@@ -59,6 +59,7 @@ settings_col = db["settings"]
 
 active_downloads  = {}
 user_settings     = {}
+user_thumbnails   = {}   # uid -> Telegram file_id of custom thumbnail
 user_dashboards   = {}
 user_edit_queues  = {}
 _dashboard_locks  = {}   # per-user asyncio.Lock to prevent duplicate dashboard creation
@@ -698,12 +699,63 @@ async def extract_archive(file_path: str, extract_to: str, task: DownloadTask = 
 
 
 # ── Upload to Telegram ────────────────────────────────────────────────────────
+# ── Thumbnail helpers ─────────────────────────────────────────────────────────
+THUMB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thumbs")
+os.makedirs(THUMB_DIR, exist_ok=True)
+
+VIDEO_EXTS = (".mp4", ".mkv", ".avi", ".webm", ".mov", ".flv", ".m4v", ".ts", ".wmv")
+
+async def generate_thumbnail(file_path: str):
+    """Auto-generate a thumbnail from a video file using ffmpeg.
+    Returns the thumbnail path, or None on failure."""
+    try:
+        thumb_path = os.path.join(THUMB_DIR, f"auto_{os.path.basename(file_path)}.jpg")
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        duration = float(stdout.decode().strip() or "0")
+        seek = max(1, duration * 0.1)
+
+        proc2 = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-ss", str(seek), "-i", file_path,
+            "-vframes", "1", "-vf", "scale=320:-1", "-q:v", "5", thumb_path,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc2.communicate()
+        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+            return thumb_path
+    except Exception as e:
+        print(f"Thumbnail generation failed for {file_path}: {e}")
+    return None
+
+
+async def get_thumb_for_upload(user_id: int, file_path: str):
+    """Return the best available thumbnail path for a given upload.
+    Priority: custom user thumbnail -> auto-generated from video -> None."""
+    custom_fid = user_thumbnails.get(user_id)
+    if custom_fid:
+        try:
+            tmp = os.path.join(THUMB_DIR, f"custom_{user_id}.jpg")
+            await app.download_media(custom_fid, file_name=tmp)
+            if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+                return tmp
+        except Exception as e:
+            print(f"Custom thumbnail download failed: {e}")
+
+    if file_path.lower().endswith(VIDEO_EXTS):
+        return await generate_thumbnail(file_path)
+    return None
+
+
 async def upload_to_telegram(file_path: str, message: Message, caption: str = "", task: DownloadTask = None) -> bool:
     if task:
         task.current_phase = "ul"
     user_id    = message.from_user.id
     as_video   = user_settings.get(user_id, {}).get("as_video", False)
-    video_exts = (".mp4", ".mkv", ".avi", ".webm")
+    video_exts = VIDEO_EXTS  # defined globally near thumbnail helpers
 
     # Fetch dump channel once per upload call, not once per file in a directory
     global_settings = await settings_col.find_one({"_id": "global_dump"})
@@ -746,11 +798,18 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
 
             fc = caption or cn
 
+            thumb_path = await get_thumb_for_upload(user_id, file_path)
+
             sent_msg = None
             if as_video and file_path.lower().endswith(video_exts):
-                sent_msg = await message.reply_video(video=file_path, caption=fc, progress=_progress, supports_streaming=True, disable_notification=True)
+                sent_msg = await message.reply_video(video=file_path, caption=fc, thumb=thumb_path, progress=_progress, supports_streaming=True, disable_notification=True)
             else:
-                sent_msg = await message.reply_document(document=file_path, caption=fc, progress=_progress, disable_notification=True)
+                sent_msg = await message.reply_document(document=file_path, caption=fc, thumb=thumb_path, progress=_progress, disable_notification=True)
+
+            # Clean up auto-generated thumb
+            if thumb_path and thumb_path.startswith(THUMB_DIR) and os.path.basename(thumb_path).startswith("auto_"):
+                try: os.remove(thumb_path)
+                except Exception: pass
 
             if sent_msg and dump_channel:
                 try:
@@ -816,11 +875,18 @@ async def upload_to_telegram(file_path: str, message: Message, caption: str = ""
                                 })
                             await push_dashboard_update(user_id)
 
+                    thumb_path = await get_thumb_for_upload(user_id, fp)
+
                     sent_msg = None
                     if as_video and fp.lower().endswith(video_exts):
-                        sent_msg = await message.reply_video(video=fp, caption=cap, progress=_f_progress, disable_notification=True)
+                        sent_msg = await message.reply_video(video=fp, caption=cap, thumb=thumb_path, progress=_f_progress, disable_notification=True)
                     else:
-                        sent_msg = await message.reply_document(document=fp, caption=cap, progress=_f_progress, disable_notification=True)
+                        sent_msg = await message.reply_document(document=fp, caption=cap, thumb=thumb_path, progress=_f_progress, disable_notification=True)
+
+                    # Clean up auto-generated thumb
+                    if thumb_path and thumb_path.startswith(THUMB_DIR) and os.path.basename(thumb_path).startswith("auto_"):
+                        try: os.remove(thumb_path)
+                        except Exception: pass
 
                     if sent_msg and dump_channel:
                         try:
@@ -1075,6 +1141,8 @@ async def help_command(client, message: Message):
         "• **Upload a `.torrent` file** directly to start\n\n"
         "**⚙️ Control:**\n"
         "• `/settings` — Toggle Document / Video upload mode\n"
+        "• `/setthumbnail` — Set custom thumbnail (reply to or send a photo)\n"
+        "• `/delthumbnail` — Remove custom thumbnail\n"
         "• `/stop <task_id>` — Cancel an active task\n"
         "• `/setdump <channel_id> -on/-off` — Manage global dump channel (Owner Only)\n\n"
         "**✨ Features:**\n"
@@ -1092,17 +1160,75 @@ async def close_help_callback(client, cq: CallbackQuery):
     except Exception: pass
 
 
+@app.on_message(filters.command(["setthumbnail"]))
+async def set_thumbnail_command(client, message: Message):
+    """Store the replied-to (or attached) photo as the user's custom upload thumbnail."""
+    uid = message.from_user.id
+    photo = None
+
+    # User can either attach a photo directly OR reply to a photo message
+    if message.photo:
+        photo = message.photo
+    elif message.reply_to_message and message.reply_to_message.photo:
+        photo = message.reply_to_message.photo
+
+    if not photo:
+        await message.reply_text(
+            "📷 **Set Custom Thumbnail**\n\n"
+            "Send a photo with the caption `/setthumbnail`, "
+            "or reply to any photo with `/setthumbnail`."
+        )
+        return
+
+    file_id = photo.file_id
+    user_thumbnails[uid] = file_id
+    await settings_col.update_one(
+        {"_id": f"user_settings_{uid}"},
+        {"$set": {"thumbnail_file_id": file_id}},
+        upsert=True,
+    )
+    await message.reply_text("✅ **Custom thumbnail saved!** It will be used for all future uploads.")
+
+
+@app.on_message(filters.command(["delthumbnail"]))
+async def del_thumbnail_command(client, message: Message):
+    """Remove the user's custom upload thumbnail."""
+    uid = message.from_user.id
+    if uid not in user_thumbnails:
+        await message.reply_text("ℹ️ You don't have a custom thumbnail set.")
+        return
+    user_thumbnails.pop(uid, None)
+    await settings_col.update_one(
+        {"_id": f"user_settings_{uid}"},
+        {"$unset": {"thumbnail_file_id": ""}},
+    )
+    # Remove cached file if present
+    cached = os.path.join(THUMB_DIR, f"custom_{uid}.jpg")
+    if os.path.exists(cached):
+        try: os.remove(cached)
+        except Exception: pass
+    await message.reply_text("🗑 **Custom thumbnail removed.** Auto-thumbnails will be used for videos.")
+
+
 @app.on_message(filters.command(["settings"]))
 async def settings_command(client, message: Message):
     uid = message.from_user.id
     av  = user_settings.get(uid, {}).get("as_video", False)
     mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
+    has_thumb = uid in user_thumbnails
+    thumb_label = "🖼 Delete Custom Thumbnail" if has_thumb else "🖼 No Custom Thumbnail"
     kb_buttons = [
         [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")],
+        [InlineKeyboardButton(thumb_label, callback_data=f"del_thumb:{uid}")] if has_thumb else
+        [InlineKeyboardButton("🖼 Set Thumbnail → Send photo with /setthumbnail", callback_data="noop")],
         [InlineKeyboardButton("🗑 Close", callback_data="close_help")],
     ]
+    thumb_status = "✅ Custom thumbnail set" if has_thumb else "🔄 Auto (from video frame)"
     await message.reply_text(
-        "⚙️ **Upload Settings**\n\nChoose how video files (.mp4, .mkv, .webm) are sent.",
+        f"⚙️ **Upload Settings**\n\n"
+        f"• Upload mode : **{mt}**\n"
+        f"• Thumbnail   : **{thumb_status}**\n\n"
+        f"_Use /setthumbnail to set a custom thumbnail._",
         reply_markup=InlineKeyboardMarkup(kb_buttons)
     )
 
@@ -1128,6 +1254,44 @@ async def toggle_mode_callback(client, cq: CallbackQuery):
     ]
     await cq.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_buttons))
     await safe_answer(cq, f"✅ Switched to {mt}!")
+
+
+@app.on_callback_query(filters.regex(r"^del_thumb:"))
+async def del_thumb_callback(client, cq: CallbackQuery):
+    _, uid_str = cq.data.split(":"); uid = int(uid_str)
+    if cq.from_user.id != uid:
+        await safe_answer(cq, "❌ These aren't your settings!", show_alert=True); return
+    user_thumbnails.pop(uid, None)
+    await settings_col.update_one(
+        {"_id": f"user_settings_{uid}"},
+        {"$unset": {"thumbnail_file_id": ""}},
+    )
+    cached = os.path.join(THUMB_DIR, f"custom_{uid}.jpg")
+    if os.path.exists(cached):
+        try: os.remove(cached)
+        except Exception: pass
+    # Rebuild the settings keyboard without the thumbnail button
+    av  = user_settings.get(uid, {}).get("as_video", False)
+    mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
+    kb_buttons = [
+        [InlineKeyboardButton(f"Toggle: {mt}", callback_data=f"toggle_mode:{uid}")],
+        [InlineKeyboardButton("🖼 Set Thumbnail → Send photo with /setthumbnail", callback_data="noop")],
+        [InlineKeyboardButton("🗑 Close", callback_data="close_help")],
+    ]
+    await cq.edit_message_text(
+        f"⚙️ **Upload Settings**\n\n"
+        f"• Upload mode : **{mt}**\n"
+        f"• Thumbnail   : **🔄 Auto (from video frame)**\n\n"
+        f"_Use /setthumbnail to set a custom thumbnail._",
+        reply_markup=InlineKeyboardMarkup(kb_buttons)
+    )
+    await safe_answer(cq, "🗑 Custom thumbnail removed!")
+
+
+@app.on_callback_query(filters.regex(r"^noop$"))
+async def noop_callback(client, cq: CallbackQuery):
+    await safe_answer(cq, "ℹ️ Send a photo with /setthumbnail to set a custom thumbnail.")
+
 
 
 # ── Keep-alive web server ─────────────────────────────────────────────────────
@@ -1160,13 +1324,16 @@ async def main():
 
     await app.start()
 
-    # Load persisted user settings (as_video toggle etc.) into memory
+    # Load persisted user settings (as_video toggle, custom thumbnails) into memory
     async for doc in settings_col.find({"_id": {"$regex": "^user_settings_"}}):
         try:
             uid = int(doc["_id"].replace("user_settings_", ""))
             user_settings[uid] = {"as_video": doc.get("as_video", False)}
+            if doc.get("thumbnail_file_id"):
+                user_thumbnails[uid] = doc["thumbnail_file_id"]
         except Exception:
             pass
+    print(f"🖼 Custom thumbnails loaded: {len(user_thumbnails)}")
 
     try:
         await app.send_message(OWNER_ID, "✅ **Bot Restarted Successfully!**")
