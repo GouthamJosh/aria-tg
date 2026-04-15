@@ -38,6 +38,19 @@ for _p in [os.path.join(BASE_DIR, "cookies.txt"), os.path.expanduser("~/cookies.
         COOKIES_FILE = _p
         break
 _BOT_START = time.time()
+
+try:
+    import uvloop; uvloop.install(); print("uvloop ok")
+except ImportError: pass
+try:
+    import tgcrypto; print("tgcrypto ok - upload speed boost active")
+except ImportError: print("WARNING: tgcrypto missing - uploads will be slow")
+
+app = Client(
+    "leech_bot",
+    api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
+    workers=WORKERS, max_concurrent_transmissions=MAX_CONCURRENT_TRANSMISSIONS,
+)
 # ═══════════════════════════════════════════
 #             SESSION STORE
 # ═══════════════════════════════════════════
@@ -816,18 +829,7 @@ def _parse_sel(text, total):
         return sorted(idx)
     except: return None
 
-try:
-    import uvloop; uvloop.install(); print("uvloop ok")
-except ImportError: pass
-try:
-    import tgcrypto; print("tgcrypto ok - upload speed boost active")
-except ImportError: print("WARNING: tgcrypto missing - uploads will be slow")
-
-app = Client(
-    "leech_bot",
-    api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
-    workers=WORKERS, max_concurrent_transmissions=MAX_CONCURRENT_TRANSMISSIONS,
-)
+#aria2 
 aria2    = aria2p.API(aria2p.Client(host=ARIA2_HOST, port=ARIA2_PORT, secret=ARIA2_SECRET))
 executor = ThreadPoolExecutor(max_workers=4)
 
