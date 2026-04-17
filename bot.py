@@ -553,8 +553,9 @@ async def ping_cmd(client, message):
 # ═══════════════════════════════════════════
 #    MESSAGE HANDLER
 # ═══════════════════════════════════════════
-@app.on_message(filters.text & ~filters.command(["start","ping","help"]))
+@app.on_message(filters.text & filters.user & ~filters.command(["start","ping","help"]))
 async def handle_url(client, message):
+    if not message.from_user: return
     uid  = message.from_user.id
     text = (message.text or "").strip()
     if not is_auth(uid): await message.reply_text("⛔ Authorized nahi ho."); return
@@ -971,6 +972,8 @@ def bot_stats_block(st: dict, task_count: int = 0) -> str:
 
 def get_user_label(message: Message) -> str:
     try:
+        if not message.from_user:
+            return "#Unknown"
         if message.from_user.username:
             return f"@{message.from_user.username} ( #ID{message.from_user.id} )"
     except Exception: pass
@@ -1543,7 +1546,7 @@ async def get_thumb_for_upload(user_id: int, file_path: str):
 async def upload_to_telegram(file_path: str, message: Message, caption: str = "", task: DownloadTask = None) -> bool:
     if task:
         task.current_phase = "ul"
-    user_id    = message.from_user.id
+    user_id    = message.from_user.id if message.from_user else 0
     as_video   = user_settings.get(user_id, {}).get("as_video", False)
     video_exts = VIDEO_EXTS  # defined globally near thumbnail helpers
 
@@ -1792,8 +1795,9 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
 #  BOT COMMANDS
 # ════════════════════════════════════════════════════════
 
-@app.on_message(filters.command(["setdump"]))
+@app.on_message(filters.command(["setdump"]) & filters.user)
 async def set_dump_channel(client, message: Message):
+    if not message.from_user: return
     if message.from_user.id != OWNER_ID:
         return await message.reply_text("❌ **Access Denied:** Only the bot owner can configure the dump channel.")
 
@@ -1825,8 +1829,9 @@ async def set_dump_channel(client, message: Message):
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
 
-@app.on_message(filters.command(["leech", "l", "ql"]))
+@app.on_message(filters.command(["leech", "l", "ql"]) & filters.user)
 async def universal_leech_command(client, message: Message):
+    if not message.from_user: return
     extract    = "-e" in message.text.lower()
     user_id    = message.from_user.id
     user_label = get_user_label(message)
@@ -1861,8 +1866,9 @@ async def universal_leech_command(client, message: Message):
             await message.reply_text(f"❌ **Failed to add:** `{str(e)}`")
 
 
-@app.on_message(filters.document)
+@app.on_message(filters.document & filters.user)
 async def handle_document_upload(client, message: Message):
+    if not message.from_user: return
     file_name = message.document.file_name or ""
 
     if file_name.endswith(".torrent"):
@@ -1907,8 +1913,9 @@ async def stop_command(client, message: Message):
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
 
-@app.on_message(filters.command(["start"]))
+@app.on_message(filters.command(["start"]) & filters.user)
 async def start_command(client, message: Message):
+    if not message.from_user: return
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚙️ Upload Settings", callback_data=f"toggle_mode:{message.from_user.id}")],
         [InlineKeyboardButton("🗑 Close", callback_data="close_help")]
@@ -1950,9 +1957,10 @@ async def close_help_callback(client, cq: CallbackQuery):
     except Exception: pass
 
 
-@app.on_message(filters.command(["setthumbnail"]))
+@app.on_message(filters.command(["setthumbnail"]) & filters.user)
 async def set_thumbnail_command(client, message: Message):
     """Store the replied-to (or attached) photo as the user's custom upload thumbnail."""
+    if not message.from_user: return
     uid = message.from_user.id
     photo = None
 
@@ -1980,9 +1988,10 @@ async def set_thumbnail_command(client, message: Message):
     await message.reply_text("✅ **Custom thumbnail saved!** It will be used for all future uploads.")
 
 
-@app.on_message(filters.command(["delthumbnail"]))
+@app.on_message(filters.command(["delthumbnail"]) & filters.user)
 async def del_thumbnail_command(client, message: Message):
     """Remove the user's custom upload thumbnail."""
+    if not message.from_user: return
     uid = message.from_user.id
     if uid not in user_thumbnails:
         await message.reply_text("ℹ️ You don't have a custom thumbnail set.")
@@ -2000,8 +2009,9 @@ async def del_thumbnail_command(client, message: Message):
     await message.reply_text("🗑 **Custom thumbnail removed.** Auto-thumbnails will be used for videos.")
 
 
-@app.on_message(filters.command(["settings"]))
+@app.on_message(filters.command(["settings"]) & filters.user)
 async def settings_command(client, message: Message):
+    if not message.from_user: return
     uid = message.from_user.id
     av  = user_settings.get(uid, {}).get("as_video", False)
     mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
