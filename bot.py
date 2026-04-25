@@ -545,6 +545,7 @@ async def show_quality_picker(url, smsg, user_id=None):
 
 @app.on_message(filters.command("ping"))
 async def ping_cmd(client, message):
+    if not message.from_user: return
     t = time.time()
     m = await message.reply_text("🏓 Pong!")
     ms = (time.time()-t)*1000
@@ -562,6 +563,7 @@ async def ping_cmd(client, message):
 # ═══════════════════════════════════════════
 @app.on_message(filters.text & ~filters.command(["start","ping","help"]))
 async def handle_url(client, message):
+    if not message.from_user: return   # ignore channel posts / anonymous admin messages
     uid  = message.from_user.id
     text = (message.text or "").strip()
     if not is_auth(uid): await message.reply_text("⛔ You are not authorized."); return
@@ -977,6 +979,8 @@ def bot_stats_block(st: dict, task_count: int = 0) -> str:
     )
 
 def get_user_label(message: Message) -> str:
+    if not message.from_user:
+        return "#ID:unknown"
     try:
         if message.from_user.username:
             return f"@{message.from_user.username} ( #ID{message.from_user.id} )"
@@ -1796,6 +1800,7 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
 
 @app.on_message(filters.command(["setdump"]))
 async def set_dump_channel(client, message: Message):
+    if not message.from_user: return
     if message.from_user.id != OWNER_ID:
         return await message.reply_text("❌ **Access Denied:** Only the bot owner can configure the dump channel.")
 
@@ -1829,6 +1834,7 @@ async def set_dump_channel(client, message: Message):
 
 @app.on_message(filters.command(["leech", "l", "ql"]))
 async def universal_leech_command(client, message: Message):
+    if not message.from_user: return
     extract    = "-e" in message.text.lower()
     user_id    = message.from_user.id
     user_label = get_user_label(message)
@@ -1865,6 +1871,7 @@ async def universal_leech_command(client, message: Message):
 
 @app.on_message(filters.document)
 async def handle_document_upload(client, message: Message):
+    if not message.from_user: return
     file_name = message.document.file_name or ""
 
     if file_name.endswith(".torrent"):
@@ -1884,6 +1891,7 @@ async def handle_document_upload(client, message: Message):
 
 @app.on_message(filters.command(["stop"]) | filters.regex(r"^/stop_\w+"))
 async def stop_command(client, message: Message):
+    if not message.from_user: return
     try:
         text = message.text or ""
         gid_short = (text.split("_", 1)[1].strip() if text.startswith("/stop_")
@@ -1911,6 +1919,7 @@ async def stop_command(client, message: Message):
 
 @app.on_message(filters.command(["start"]))
 async def start_command(client, message: Message):
+    if not message.from_user: return
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚙️ Upload Settings", callback_data=f"toggle_mode:{message.from_user.id}")],
         [InlineKeyboardButton("🗑 Close", callback_data="close_help")]
@@ -1923,6 +1932,7 @@ async def start_command(client, message: Message):
 
 @app.on_message(filters.command(["help"]))
 async def help_command(client, message: Message):
+    if not message.from_user: return
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Close", callback_data="close_help")]])
     await message.reply_text(
         "**📖 Leech Bot — Help & Commands**\n\n"
@@ -1955,6 +1965,7 @@ async def close_help_callback(client, cq: CallbackQuery):
 @app.on_message(filters.command(["setthumbnail"]))
 async def set_thumbnail_command(client, message: Message):
     """Store the replied-to (or attached) photo as the user's custom upload thumbnail."""
+    if not message.from_user: return
     uid = message.from_user.id
     photo = None
 
@@ -1985,6 +1996,7 @@ async def set_thumbnail_command(client, message: Message):
 @app.on_message(filters.command(["delthumbnail"]))
 async def del_thumbnail_command(client, message: Message):
     """Remove the user's custom upload thumbnail."""
+    if not message.from_user: return
     uid = message.from_user.id
     if uid not in user_thumbnails:
         await message.reply_text("ℹ️ You don't have a custom thumbnail set.")
@@ -2004,6 +2016,7 @@ async def del_thumbnail_command(client, message: Message):
 
 @app.on_message(filters.command(["settings"]))
 async def settings_command(client, message: Message):
+    if not message.from_user: return
     uid = message.from_user.id
     av  = user_settings.get(uid, {}).get("as_video", False)
     mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
