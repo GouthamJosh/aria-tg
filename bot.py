@@ -573,7 +573,7 @@ async def handle_url(client, message):
             total   = len(e["entries"])
             indices = _parse_sel(text, total)
             if indices is None:
-                await message.reply_text(f"❌ Invalid!\nFormat: `1,3,5` ya `1-10`\nTotal: `{total}`")
+                await message.reply_text(f"❌ Invalid selection!\nFormat: `1,3,5` or `1-10`\nTotal: `{total}`")
                 return
             e["sel"] = indices
             WAITING_SEL.pop(uid, None)
@@ -1338,11 +1338,6 @@ async def dashboard_page_callback(client, cq: CallbackQuery):
     except Exception as e:
         await safe_answer(cq, f"❌ {e}", show_alert=True)
 
-
-# ── Callback: no-op ───────────────────────────────────────────────────────────
-@app.on_callback_query(filters.regex(r"^noop$"))
-async def noop_callback(client, cq: CallbackQuery):
-    await safe_answer(cq)
 
 
 # ── Download progress poller ──────────────────────────────────────────────────
@@ -2145,4 +2140,30 @@ async def main():
 
 
 if __name__ == "__main__":
-    app.run(main())
+    RETRY_DELAY = 5   # seconds between restart attempts
+    MAX_RETRIES = 10  # max consecutive crashes before giving up
+
+    consecutive_failures = 0
+    while True:
+        try:
+            app.run(main())
+            # idle() returned cleanly (SIGINT / SIGTERM) — exit normally
+            break
+        except KeyboardInterrupt:
+            print("🛑 Bot stopped by user.")
+            break
+        except Exception as e:
+            consecutive_failures += 1
+            logger.exception(f"💥 Bot crashed (attempt {consecutive_failures}/{MAX_RETRIES}): {e}")
+            if consecutive_failures >= MAX_RETRIES:
+                logger.critical("🚫 Too many consecutive crashes. Exiting.")
+                break
+            print(f"🔄 Restarting in {RETRY_DELAY}s... (crash #{consecutive_failures})")
+            # Reset Pyrogram client state so it can reconnect cleanly
+            try:
+                import asyncio as _aio
+                _aio.get_event_loop().run_until_complete(app.stop())
+            except Exception:
+                pass
+            time.sleep(RETRY_DELAY)
+            consecutive_failures = 0 if consecutive_failures < MAX_RETRIES else consecutive_failures
