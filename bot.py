@@ -2,13 +2,6 @@ from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
 import os, re, time, math, uuid, logging, asyncio, requests, yt_dlp, shutil
 from contextlib import suppress
-from datetime import datetime
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
 import aria2p
 from aiohttp import web
 from pyrogram import Client, filters, idle
@@ -121,7 +114,7 @@ def extract_url(text):
     return m.group(0) if m else None
 
 def is_playlist_url(url):
-    # BUG FIX: URLs with a list= param are also playlists
+    # BUG FIX: list= param wali URLs bhi playlist hain
     # e.g. youtube.com/watch?v=xxx&list=PLyyy — mixed video+playlist URL
     if re.search(r"[?&]list=PL[a-zA-Z0-9_-]+", url): return True  # YouTube playlist ID
     if re.search(r"(playlist\?list=|/playlist/)", url, re.I): return True
@@ -311,7 +304,7 @@ def _kb_main(fmts, uid, is_pl, tl):
                 row.append(InlineKeyboardButton(b_name, callback_data=f"q|{uid}|dict|{b_name}"))
             if len(row) == 2: btns.append(row); row = []
         if row: btns.append(row)
-        msg = f"🎬 **Choose Quality:**\n⏳ `{time_fmt(tl)}`"
+        msg = f"🎬 **Quality Choose :**\n⏳ `{time_fmt(tl)}`"
     btns.append([
         InlineKeyboardButton("🎵 MP3", callback_data=f"q|{uid}|mp3|"),
         InlineKeyboardButton("🎧 Audio Formats", callback_data=f"q|{uid}|audiofmt|"),
@@ -360,7 +353,7 @@ def _kb_audioq(prefix, uid, tl):
 
 def _kb_playlist(uid, total):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📥 Download All ({total})", callback_data=f"pl|{uid}|all")],
+        [InlineKeyboardButton(f"📥 all Download ({total})", callback_data=f"pl|{uid}|all")],
         [InlineKeyboardButton("🎯 Select Videos", callback_data=f"pl|{uid}|select")],
         [InlineKeyboardButton("🖼️ Thumbnails", callback_data=f"pl|{uid}|thumbs"),
          InlineKeyboardButton("❌ Cancel", callback_data=f"pl|{uid}|cancel")],
@@ -380,15 +373,15 @@ def _blocking_info(url):
         return None
 
 def _blocking_playlist_info(url):
-    # BUG FIX: Remove playlist_items="0" — it was only intended for info fetching,
-    # but with "0" set, entries are never returned for playlists!
+    # BUG FIX: playlist_items="0" remove karo — ye sirf info fetch ke liye tha,
+    # playlist mein "0" set hone se entries hi nahi aate!
     opts = _info_opts()
     opts.pop("playlist_items", None)   # ← CRITICAL FIX
-    opts.pop("format", None)           # format is not needed for playlist info
+    opts.pop("format", None)           # playlist mein format nahi chahiye info ke liye
     opts.update({
         "extract_flat":  True,
         "playlistend":   MAX_PLAYLIST,
-        "ignoreerrors":  True,         # don't abort entire playlist if one video fails
+        "ignoreerrors":  True,         # koi ek video fail ho to poori playlist na ruke
     })
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -499,11 +492,11 @@ async def show_quality_picker(url, smsg, user_id=None):
     info = await loop.run_in_executor(None, _blocking_info, url)
     if not info:
         await _safe_edit(smsg,
-            "❌ **Video info not found!**\n\n"
-            "• Is the video private or age-restricted?\n"
-            "• Refresh cookies.txt\n"
-            "• Check proxy settings\n"
-            "• Is the URL correct?")
+            "❌ **Video not found!**\n\n"
+            "• Video private/age-restricted?\n"
+            "• cookies.txt refresh karo\n"
+            "• Proxy check karo\n"
+            "• URL err?")
         return
 
     fmts, is_pl = parse_formats(info)
@@ -545,7 +538,6 @@ async def show_quality_picker(url, smsg, user_id=None):
 
 @app.on_message(filters.command("ping"))
 async def ping_cmd(client, message):
-    if not message.from_user: return
     t = time.time()
     m = await message.reply_text("🏓 Pong!")
     ms = (time.time()-t)*1000
@@ -563,10 +555,9 @@ async def ping_cmd(client, message):
 # ═══════════════════════════════════════════
 @app.on_message(filters.text & ~filters.command(["start","ping","help"]))
 async def handle_url(client, message):
-    if not message.from_user: return   # ignore channel posts / anonymous admin messages
     uid  = message.from_user.id
     text = (message.text or "").strip()
-    if not is_auth(uid): await message.reply_text("⛔ You are not authorized."); return
+    if not is_auth(uid): await message.reply_text("⛔ Authorized nahi ho."); return
 
     if uid in WAITING_SEL:
         pl_uid = WAITING_SEL[uid]
@@ -575,11 +566,11 @@ async def handle_url(client, message):
             total   = len(e["entries"])
             indices = _parse_sel(text, total)
             if indices is None:
-                await message.reply_text(f"❌ Invalid selection!\nFormat: `1,3,5` or `1-10`\nTotal: `{total}`")
+                await message.reply_text(f"❌ Invalid!\nFormat: `1,3,5` ya `1-10`\nTotal: `{total}`")
                 return
             e["sel"] = indices
             WAITING_SEL.pop(uid, None)
-            smsg = await message.reply_text(f"✅ Selected `{len(indices)}` videos. Fetching quality options...")
+            smsg = await message.reply_text(f"✅ `{len(indices)}` select kiye. Quality...")
             loop = asyncio.get_event_loop()
             fu   = e["entries"][indices[0]].get("url") or e["entries"][indices[0]].get("webpage_url")
             try:
@@ -602,7 +593,7 @@ async def handle_url(client, message):
     if not url: return
 
     url    = clean_url(url)
-    status = await message.reply_text("🔍 **Fetching info...**")
+    status = await message.reply_text("🔍 **Info le raha hoon...**")
     loop   = asyncio.get_event_loop()
     _cleanup()
 
@@ -620,8 +611,8 @@ async def handle_url(client, message):
                 vl = ""
                 for i, e in enumerate(entries[:12], 1):
                     vl += f"`{i:02d}.` {(e.get('title') or f'Video {i}')[:35]} `[{time_fmt(e.get('duration',0))}]`\n"
-                if len(entries) > 12: vl += f"_...and {len(entries)-12} more_"
-                cap = (f"📋 **{pl_title}**\n👤 `{channel}`\n🎬 `{len(entries)}` videos  ⏱️ `{time_fmt(total_dur)}`\n\n{vl}\n\n**What would you like to download?**")
+                if len(entries) > 12: vl += f"_...aur {len(entries)-12} more_"
+                cap = (f"📋 **{pl_title}**\n👤 `{channel}`\n🎬 `{len(entries)}` videos  ⏱️ `{time_fmt(total_dur)}`\n\n{vl}\n\n**Kya download karna hai?**")
                 with suppress(Exception): await status.delete()
                 try:
                     th = (info.get("thumbnails") or [{}])[-1].get("url","")
@@ -642,9 +633,9 @@ async def quality_cb(client, query: CallbackQuery):
     uid    = parts[1]; action = parts[2]; rest = parts[3:] if len(parts) > 3 else []
     e      = URL_SESSIONS.get(uid)
     if not e:
-        await query.answer("⚠️ Session expired! Send the link again.", show_alert=True); return
+        await query.answer("⚠️ Session expire! Link dobara bhejo.", show_alert=True); return
     if e.get("user_id") and query.from_user.id != e["user_id"]:
-        await query.answer("❌ This is not yours!", show_alert=True); return
+        await query.answer("❌ Tera nahi!", show_alert=True); return
     await query.answer()
     tl = max(0, e["timeout"] - (time.time() - e["created"]))
     fmts = e["fmts"]; is_pl = e["is_pl"]
@@ -673,7 +664,7 @@ async def quality_cb(client, query: CallbackQuery):
     if action == "sub":
         b_name = rest[0]; tbr = rest[1]
         vl = fmts.get(b_name, {}).get(tbr)
-        if not vl: await query.answer("Format not found!"); return
+        if not vl: await query.answer("Format nahi mila!"); return
         await _start_dl(uid, vl[1], e, query, client); return
     if action == "fmt":
         qual = rest[0] if rest else "bv*+ba/b"
@@ -688,11 +679,11 @@ async def playlist_cb(client, query: CallbackQuery):
         PL_SESSIONS.pop(uid, None); WAITING_SEL.pop(query.from_user.id, None)
         with suppress(Exception): await query.message.delete()
         await query.answer(); return
-    if not e: await query.answer("⚠️ Session expired!", show_alert=True); return
+    if not e: await query.answer("⚠️ Session expire!", show_alert=True); return
     await query.answer()
 
     if sub == "thumbs":
-        sm = await query.message.reply_text("🖼️ Fetching thumbnails..."); sent = 0
+        sm = await query.message.reply_text("🖼️ Thumbnails le raha hoon..."); sent = 0
         for i, en in enumerate(e["entries"], 1):
             tu = en.get("thumbnail") or (en.get("thumbnails") or [{}])[-1].get("url","")
             if not tu: continue
@@ -712,8 +703,8 @@ async def playlist_cb(client, query: CallbackQuery):
         WAITING_SEL[query.from_user.id] = uid; total = len(e["entries"]); vl = ""
         for i, en in enumerate(e["entries"][:20], 1):
             vl += f"`{i:02d}.` {(en.get('title') or f'Video {i}')[:35]} `[{time_fmt(en.get('duration',0))}]`\n"
-        if total > 20: vl += f"_...{total-20} more_"
-        await query.message.reply_text(f"🎯 **Select videos:**\nTotal: `{total}`\n\n{vl}\nFormat: `1,3,5` or `1-10`"); return
+        if total > 20: vl += f"_...{total-20} aur_"
+        await query.message.reply_text(f"🎯 **Select karo:**\nTotal: `{total}`\n\n{vl}\nFormat: `1,3,5` ya `1-10`"); return
 
     if sub == "all":
         sm = await query.message.reply_text("🔍 Quality options...")
@@ -746,7 +737,7 @@ async def _start_dl(uid, qual, e, query, client):
     pl_uid     = e.get("pl_uid")
     pl_indices = e.get("pl_indices")
 
-    smsg = await query.message.reply_text(f"⚙️ **Starting download...**\n🎞️ `{qual[:50]}`")
+    smsg = await query.message.reply_text(f"⚙️ **Downloading...**\n🎞️ `{qual[:50]}`")
 
     if pl_uid and pl_indices is not None:
         pl_e    = PL_SESSIONS.get(pl_uid, {})
@@ -762,15 +753,15 @@ async def _dl_single(url, qual, info, smsg, client, chat_id):
     os.makedirs(dl_dir, exist_ok=True)
     out_tmpl = os.path.join(dl_dir, "%(title,fulltitle,alt_title)s %(height)sp%(fps)s.fps %(tbr)d.%(ext)s")
 
-    await _safe_edit(smsg, "⬇️ **Starting download...**")
+    await _safe_edit(smsg, "⬇️ **Downloading...**")
     result = await loop.run_in_executor(None, _blocking_download, url, qual, out_tmpl, smsg, loop, False)
 
     if not result:
-        await _safe_edit(smsg, "❌ **Download failed!**\n\n• Refresh cookies.txt\n• Check proxy settings\n• Private video?")
+        await _safe_edit(smsg, "❌ **Download fail!**\n\n• cookies.txt refresh karo\n• Proxy check karo\n• Private video?")
         with suppress(Exception): shutil.rmtree(dl_dir)
         return
 
-    await _safe_edit(smsg, f"📤 **Uploading...**\n📦 `{humanbytes(os.path.getsize(result['filepath']))}`")
+    await _safe_edit(smsg, f"📤 **Upload ho raha hai...**\n📦 `{humanbytes(os.path.getsize(result['filepath']))}`")
     ok = await upload_file(client, chat_id, result, qual, smsg)
     if ok:
         with suppress(Exception): await smsg.delete()
@@ -979,8 +970,6 @@ def bot_stats_block(st: dict, task_count: int = 0) -> str:
     )
 
 def get_user_label(message: Message) -> str:
-    if not message.from_user:
-        return "#ID:unknown"
     try:
         if message.from_user.username:
             return f"@{message.from_user.username} ( #ID{message.from_user.id} )"
@@ -1342,6 +1331,11 @@ async def dashboard_page_callback(client, cq: CallbackQuery):
     except Exception as e:
         await safe_answer(cq, f"❌ {e}", show_alert=True)
 
+
+# ── Callback: no-op ───────────────────────────────────────────────────────────
+@app.on_callback_query(filters.regex(r"^noop$"))
+async def noop_callback(client, cq: CallbackQuery):
+    await safe_answer(cq)
 
 
 # ── Download progress poller ──────────────────────────────────────────────────
@@ -1800,7 +1794,6 @@ async def process_task_execution(message: Message, task: DownloadTask, download,
 
 @app.on_message(filters.command(["setdump"]))
 async def set_dump_channel(client, message: Message):
-    if not message.from_user: return
     if message.from_user.id != OWNER_ID:
         return await message.reply_text("❌ **Access Denied:** Only the bot owner can configure the dump channel.")
 
@@ -1834,7 +1827,6 @@ async def set_dump_channel(client, message: Message):
 
 @app.on_message(filters.command(["leech", "l", "ql"]))
 async def universal_leech_command(client, message: Message):
-    if not message.from_user: return
     extract    = "-e" in message.text.lower()
     user_id    = message.from_user.id
     user_label = get_user_label(message)
@@ -1871,7 +1863,6 @@ async def universal_leech_command(client, message: Message):
 
 @app.on_message(filters.document)
 async def handle_document_upload(client, message: Message):
-    if not message.from_user: return
     file_name = message.document.file_name or ""
 
     if file_name.endswith(".torrent"):
@@ -1891,7 +1882,6 @@ async def handle_document_upload(client, message: Message):
 
 @app.on_message(filters.command(["stop"]) | filters.regex(r"^/stop_\w+"))
 async def stop_command(client, message: Message):
-    if not message.from_user: return
     try:
         text = message.text or ""
         gid_short = (text.split("_", 1)[1].strip() if text.startswith("/stop_")
@@ -1919,7 +1909,6 @@ async def stop_command(client, message: Message):
 
 @app.on_message(filters.command(["start"]))
 async def start_command(client, message: Message):
-    if not message.from_user: return
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚙️ Upload Settings", callback_data=f"toggle_mode:{message.from_user.id}")],
         [InlineKeyboardButton("🗑 Close", callback_data="close_help")]
@@ -1932,7 +1921,6 @@ async def start_command(client, message: Message):
 
 @app.on_message(filters.command(["help"]))
 async def help_command(client, message: Message):
-    if not message.from_user: return
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Close", callback_data="close_help")]])
     await message.reply_text(
         "**📖 Leech Bot — Help & Commands**\n\n"
@@ -1965,7 +1953,6 @@ async def close_help_callback(client, cq: CallbackQuery):
 @app.on_message(filters.command(["setthumbnail"]))
 async def set_thumbnail_command(client, message: Message):
     """Store the replied-to (or attached) photo as the user's custom upload thumbnail."""
-    if not message.from_user: return
     uid = message.from_user.id
     photo = None
 
@@ -1996,7 +1983,6 @@ async def set_thumbnail_command(client, message: Message):
 @app.on_message(filters.command(["delthumbnail"]))
 async def del_thumbnail_command(client, message: Message):
     """Remove the user's custom upload thumbnail."""
-    if not message.from_user: return
     uid = message.from_user.id
     if uid not in user_thumbnails:
         await message.reply_text("ℹ️ You don't have a custom thumbnail set.")
@@ -2016,7 +2002,6 @@ async def del_thumbnail_command(client, message: Message):
 
 @app.on_message(filters.command(["settings"]))
 async def settings_command(client, message: Message):
-    if not message.from_user: return
     uid = message.from_user.id
     av  = user_settings.get(uid, {}).get("as_video", False)
     mt  = "🎬 Video (Playable)" if av else "📄 Document (File)"
@@ -2153,30 +2138,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    RETRY_DELAY = 5   # seconds between restart attempts
-    MAX_RETRIES = 10  # max consecutive crashes before giving up
-
-    consecutive_failures = 0
-    while True:
-        try:
-            app.run(main())
-            # idle() returned cleanly (SIGINT / SIGTERM) — exit normally
-            break
-        except KeyboardInterrupt:
-            print("🛑 Bot stopped by user.")
-            break
-        except Exception as e:
-            consecutive_failures += 1
-            logger.exception(f"💥 Bot crashed (attempt {consecutive_failures}/{MAX_RETRIES}): {e}")
-            if consecutive_failures >= MAX_RETRIES:
-                logger.critical("🚫 Too many consecutive crashes. Exiting.")
-                break
-            print(f"🔄 Restarting in {RETRY_DELAY}s... (crash #{consecutive_failures})")
-            # Reset Pyrogram client state so it can reconnect cleanly
-            try:
-                import asyncio as _aio
-                _aio.get_event_loop().run_until_complete(app.stop())
-            except Exception:
-                pass
-            time.sleep(RETRY_DELAY)
-            consecutive_failures = 0 if consecutive_failures < MAX_RETRIES else consecutive_failures
+    app.run(main())
