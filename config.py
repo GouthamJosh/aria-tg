@@ -50,14 +50,14 @@ MIN_EDIT_GAP               = int(os.environ.get("MIN_EDIT_GAP", "5"))
 # ─────────────────────────────────────────────────────────────────────────────
 #  Pyrogram Client Settings
 # ─────────────────────────────────────────────────────────────────────────────
-WORKERS                      = int(os.environ.get("WORKERS", "1000"))
-MAX_CONCURRENT_TRANSMISSIONS = int(os.environ.get("MAX_CONCURRENT_TRANSMISSIONS", "50"))
+WORKERS                      = int(os.environ.get("WORKERS", "3000"))
+MAX_CONCURRENT_TRANSMISSIONS = int(os.environ.get("MAX_CONCURRENT_TRANSMISSIONS", "150"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Upload Speed Tuning
 # ─────────────────────────────────────────────────────────────────────────────
 # Max files uploaded in parallel when uploading a directory
-UPLOAD_PARALLEL_FILES = int(os.environ.get("UPLOAD_PARALLEL_FILES", "2"))
+UPLOAD_PARALLEL_FILES = int(os.environ.get("UPLOAD_PARALLEL_FILES", "1"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Trackers — 38 trackers across 3 tiers
